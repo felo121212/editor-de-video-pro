@@ -18,8 +18,8 @@ const upload = multer({
     fileSize: env.maxUploadMb * 1024 * 1024
   },
   fileFilter: (_req, file, cb) => {
-    if (file.fieldname === 'video' && file.mimetype.startsWith('video/')) return cb(null, true);
-    if (file.fieldname === 'asset' && ['image/png', 'image/jpeg', 'image/webp'].includes(file.mimetype)) return cb(null, true);
+    if (file.fieldname === 'video' && isAllowedVideoUpload(file)) return cb(null, true);
+    if (file.fieldname === 'asset' && isAllowedImageUpload(file)) return cb(null, true);
     const error = new Error(`Unsupported upload type: ${file.mimetype}`) as Error & { status: number };
     error.status = 400;
     return cb(error);
@@ -285,6 +285,16 @@ function normalizeJobType(type: string): JobType | null {
     render: 'render'
   };
   return map[type] ?? null;
+}
+
+function isAllowedVideoUpload(file: Express.Multer.File) {
+  const ext = path.extname(file.originalname ?? '').toLowerCase();
+  return file.mimetype.startsWith('video/') || ['.mp4', '.mov', '.m4v', '.webm', '.mkv'].includes(ext);
+}
+
+function isAllowedImageUpload(file: Express.Multer.File) {
+  const ext = path.extname(file.originalname ?? '').toLowerCase();
+  return ['image/png', 'image/jpeg', 'image/webp'].includes(file.mimetype) || ['.png', '.jpg', '.jpeg', '.webp'].includes(ext);
 }
 
 function parseCsv(value: unknown) {

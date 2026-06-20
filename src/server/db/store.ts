@@ -83,7 +83,7 @@ function sortByTime<T extends { createdAt?: string; startMs?: number }>(items: T
 }
 
 class JsonStore implements Store {
-  private file = path.resolve(process.cwd(), '.data/dev-db.json');
+  private file = env.jsonDbPath;
   private mutex = Promise.resolve();
 
   async migrate() {

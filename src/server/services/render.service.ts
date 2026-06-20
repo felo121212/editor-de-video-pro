@@ -38,7 +38,7 @@ export async function renderVideo(state: EditorState, jobId: string) {
   const outputPath = path.join(renderDir, `render-${Date.now()}.mp4`);
 
   try {
-    const cutInput = await renderCuts(state.video.originalPath, cutPath, tmpDir, jobId, keeps);
+    const cutInput = await renderCuts(state.video.originalPath, cutPath, tmpDir, jobId, keeps, state.video.durationMs);
     await writeAssFile(subtitlePath, state.subtitles, keeps);
 
     await runCommand(env.ffmpegPath, [
@@ -67,9 +67,23 @@ export async function renderVideo(state: EditorState, jobId: string) {
 }
 
 function buildKeepSegments(durationMs: number, silences: SilenceSegment[]) {
-  const cuts = silences
+  const rawCuts = silences
     .filter((segment) => segment.action === 'cut')
+    .map((segment) => ({
+      startMs: Math.max(0, Math.min(durationMs, segment.startMs)),
+      endMs: Math.max(0, Math.min(durationMs, segment.endMs))
+    }))
+    .filter((segment) => segment.endMs > segment.startMs + 80)
     .sort((a, b) => a.startMs - b.startMs);
+  const cuts: KeepSegment[] = [];
+  for (const cut of rawCuts) {
+    const previous = cuts[cuts.length - 1];
+    if (previous && cut.startMs <= previous.endMs + 60) {
+      previous.endMs = Math.max(previous.endMs, cut.endMs);
+    } else {
+      cuts.push({ ...cut });
+    }
+  }
   const keeps: KeepSegment[] = [];
   let cursor = 0;
   for (const cut of cuts) {
@@ -80,8 +94,8 @@ function buildKeepSegments(durationMs: number, silences: SilenceSegment[]) {
   return keeps.length ? keeps : [{ startMs: 0, endMs: durationMs }];
 }
 
-async function renderCuts(inputPath: string, outputPath: string, tmpDir: string, jobId: string, keeps: KeepSegment[]) {
-  if (keeps.length === 1 && keeps[0].startMs === 0) return inputPath;
+async function renderCuts(inputPath: string, outputPath: string, tmpDir: string, jobId: string, keeps: KeepSegment[], durationMs: number) {
+  if (keeps.length === 1 && keeps[0].startMs === 0 && keeps[0].endMs >= durationMs - 80) return inputPath;
   const listFile = path.join(tmpDir, `${jobId}-concat.txt`);
   const lines: string[] = [];
   for (let index = 0; index < keeps.length; index += 1) {

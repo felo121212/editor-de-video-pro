@@ -67,12 +67,20 @@ PORT=8787
 APP_ORIGIN=http://localhost:5173
 DATABASE_URL=mysql://root:password@localhost:3306/editor_video_pro
 STORAGE_DIR=./storage
+JSON_DB_PATH=
 PUBLIC_BASE_URL=
 FFMPEG_PATH=ffmpeg
 FFPROBE_PATH=ffprobe
 FFMPEG_TIMEOUT_MS=1200000
+SILENCE_NOISE_DB=-35
+SILENCE_MIN_DURATION_SEC=0.35
 OPENAI_API_KEY=
-OPENAI_TRANSCRIBE_MODEL=gpt-4o-transcribe
+OPENAI_TRANSCRIBE_MODEL=whisper-1
+TRANSCRIPTION_API_KEY=
+TRANSCRIPTION_API_URL=https://api.openai.com/v1/audio/transcriptions
+TRANSCRIPTION_MODEL=whisper-1
+TRANSCRIPTION_LANGUAGE=es
+TRANSCRIPTION_PROMPT=Spanish / Argentine Spanish. Marketing, ecommerce, Meta Ads, ROAS, CPA, campanas, ventas.
 WORKER_ID=local-worker
 MAX_UPLOAD_MB=700
 AUTH_USERNAME=metamize
@@ -97,6 +105,8 @@ STORAGE_DIR=/data
 APP_ORIGIN=https://tu-dominio.up.railway.app
 PUBLIC_BASE_URL=https://tu-dominio.up.railway.app
 OPENAI_API_KEY=opcional
+TRANSCRIPTION_MODEL=whisper-1
+TRANSCRIPTION_LANGUAGE=es
 AUTH_USERNAME=metamize
 AUTH_PASSWORD=una-clave-larga
 RUN_WORKER_IN_WEB=true
@@ -137,7 +147,8 @@ El Dockerfile ya instala FFmpeg.
 ## Limites honestos del MVP
 
 - Los zooms son punch-in basicos; no hay keyframes visuales avanzados todavia.
-- La transcripcion local no esta incluida; sin `OPENAI_API_KEY`, crea bloques editables manuales.
+- La transcripcion local no esta incluida; sin `OPENAI_API_KEY` o `TRANSCRIPTION_API_KEY`, crea bloques editables manuales.
+- Para timestamps confiables en OpenAI, usar `TRANSCRIPTION_MODEL=whisper-1`. Modelos `gpt-4o-transcribe` pueden servir para texto simple, pero no entregan el mismo modo `verbose_json` con timestamps.
 - El preview simula overlays/zoom de manera simple; el render final usa FFmpeg.
 - Para muchos usuarios concurrentes conviene cambiar la cola MySQL por Redis/BullMQ o una cola gestionada.
 - Para worker separado o archivos grandes conviene mover storage a S3/R2.
@@ -150,4 +161,3 @@ El Dockerfile ya instala FFmpeg.
 - Plantillas de subtitulos por marca.
 - Render con Remotion para motion graphics mas complejos.
 - Redis queue y workers autoscalables.
-

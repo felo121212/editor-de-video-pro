@@ -103,6 +103,12 @@ export async function createProxy(inputPath: string, outputPath: string) {
   ]);
 }
 
+export interface DetectSilenceOptions {
+  noiseDb?: number;
+  minDurationSec?: number;
+  durationMs?: number;
+}
+
 export async function extractAudio(inputPath: string, outputPath: string) {
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   await runCommand(env.ffmpegPath, [
@@ -120,21 +126,18 @@ export async function extractAudio(inputPath: string, outputPath: string) {
   ]);
 }
 
-export async function detectSilence(inputPath: string, videoId: string) {
-  const { stderr } = await runCommand(env.ffmpegPath, ['-i', inputPath, '-af', 'silencedetect=noise=-35dB:d=0.35', '-f', 'null', '-']);
+export async function detectSilence(inputPath: string, videoId: string, options: DetectSilenceOptions = {}) {
+  const noiseDb = clamp(options.noiseDb ?? env.silenceNoiseDb, -80, -10);
+  const minDurationSec = clamp(options.minDurationSec ?? env.silenceMinDurationSec, 0.12, 3);
+  const filter = `silencedetect=noise=${noiseDb}dB:d=${minDurationSec}`;
+  const { stderr } = await runCommand(env.ffmpegPath, ['-hide_banner', '-i', inputPath, '-af', filter, '-f', 'null', '-']);
 
-  const startRegex = /silence_start:\s*([0-9.]+)/g;
-  const endRegex = /silence_end:\s*([0-9.]+)\s*\|\s*silence_duration:\s*([0-9.]+)/g;
-  const starts = [...stderr.matchAll(startRegex)].map((match) => Number(match[1]));
-  const ends = [...stderr.matchAll(endRegex)].map((match) => ({
-    end: Number(match[1]),
-    duration: Number(match[2])
-  }));
+  const events = parseSilenceLog(stderr);
   const rows: SilenceSegment[] = [];
-  for (let index = 0; index < Math.min(starts.length, ends.length); index += 1) {
-    const startMs = Math.round(starts[index] * 1000);
-    const endMs = Math.round(ends[index].end * 1000);
-    if (endMs - startMs < 250) continue;
+  for (const event of events) {
+    const startMs = Math.round(event.startSec * 1000);
+    const endMs = Math.round(event.endSec * 1000);
+    if (endMs - startMs < Math.max(120, minDurationSec * 1000 * 0.8)) continue;
     rows.push({
       id: createId(),
       videoId,
@@ -147,16 +150,44 @@ export async function detectSilence(inputPath: string, videoId: string) {
   return rows;
 }
 
+function parseSilenceLog(stderr: string) {
+  const rows: Array<{ startSec: number; endSec: number; durationSec: number }> = [];
+  let currentStart: number | null = null;
+  for (const line of stderr.split(/\r?\n/)) {
+    const start = /silence_start:\s*([0-9.]+)/.exec(line);
+    if (start) {
+      currentStart = Number(start[1]);
+      continue;
+    }
+    const end = /silence_end:\s*([0-9.]+)\s*\|\s*silence_duration:\s*([0-9.]+)/.exec(line);
+    if (end) {
+      const endSec = Number(end[1]);
+      const durationSec = Number(end[2]);
+      const startSec = currentStart ?? Math.max(0, endSec - durationSec);
+      if (Number.isFinite(startSec) && Number.isFinite(endSec) && endSec > startSec) {
+        rows.push({ startSec, endSec, durationSec });
+      }
+      currentStart = null;
+    }
+  }
+  return rows;
+}
+
+function clamp(value: number, min: number, max: number) {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, value));
+}
+
 export async function trimSegment(inputPath: string, outputPath: string, startMs: number, endMs: number) {
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   await runCommand(env.ffmpegPath, [
     '-y',
     '-ss',
     formatSeconds(startMs),
-    '-to',
-    formatSeconds(endMs),
     '-i',
     inputPath,
+    '-t',
+    formatSeconds(Math.max(1, endMs - startMs)),
     '-vf',
     'scale=ceil(iw/2)*2:ceil(ih/2)*2',
     '-c:v',

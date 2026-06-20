@@ -38,7 +38,12 @@ while (true) {
     }
 
     if (job.type === 'detect_silence') {
-      const rows = await detectSilence(video.originalPath, video.id);
+      const settings = {
+        noiseDb: numberFromPayload(job.payload.noiseDb, env.silenceNoiseDb),
+        minDurationSec: numberFromPayload(job.payload.minDurationSec, env.silenceMinDurationSec),
+        durationMs: video.durationMs
+      };
+      const rows = await detectSilence(video.originalPath, video.id, settings);
       await store.replaceSilences(video.id, rows);
       const existingTimeline = await store.getTimeline(video.id);
       const nonCuts = existingTimeline.filter((event) => event.type !== 'cut');
@@ -55,7 +60,7 @@ while (true) {
         }))
       ]);
       await store.updateVideo(video.id, { status: 'ready' });
-      await store.updateJob(job.id, { status: 'done', progress: 100, result: { count: rows.length } });
+      await store.updateJob(job.id, { status: 'done', progress: 100, result: { count: rows.length, settings } });
       continue;
     }
 
@@ -93,4 +98,9 @@ while (true) {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function numberFromPayload(value: unknown, fallback: number) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
 }
