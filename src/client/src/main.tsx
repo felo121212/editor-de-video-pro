@@ -1353,7 +1353,15 @@ function Inspector({
               onRefresh={onRefresh}
             />
           )}
-          {activeTab === 'transcript' && <TranscriptEditor state={state} onSave={onSaveTranscript} onSeek={onSeek} />}
+          {activeTab === 'transcript' && (
+            <TranscriptEditor
+              state={state}
+              onSave={onSaveTranscript}
+              onSaveSubtitles={onSaveSubtitles}
+              onSaveTimeline={onSaveTimeline}
+              onSeek={onSeek}
+            />
+          )}
           {activeTab === 'subtitles' && <SubtitleEditor state={state} onSave={onSaveSubtitles} onRegenerate={onRegenerateSubtitles} onSeek={onSeek} />}
           {activeTab === 'silences' && <SilenceEditor state={state} busy={busy} onSave={onSaveSilences} onDetect={onDetectSilence} />}
           {activeTab === 'assets' && <AssetEditor state={state} onUploadAsset={onUploadAsset} onSaveAsset={onSaveAsset} onRefresh={onRefresh} />}
@@ -1561,18 +1569,198 @@ function PositionFields({ asset, onChange }: { asset: ApiAsset; onChange: (posit
   );
 }
 
-function TranscriptEditor({ state, onSave, onSeek }: { state: ApiState; onSave: (items: TranscriptSegment[]) => Promise<void>; onSeek: (ms: number) => void }) {
+function TranscriptEditor({
+  state,
+  onSave,
+  onSaveSubtitles,
+  onSaveTimeline,
+  onSeek
+}: {
+  state: ApiState;
+  onSave: (items: TranscriptSegment[]) => Promise<void>;
+  onSaveSubtitles: (items: SubtitleCue[]) => Promise<void>;
+  onSaveTimeline: (items: TimelineEvent[]) => Promise<void>;
+  onSeek: (ms: number) => void;
+}) {
   const [items, setItems] = useState(state.transcript);
+  const [query, setQuery] = useState('');
+  const [replaceValue, setReplaceValue] = useState('');
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   useEffect(() => setItems(state.transcript), [state.transcript]);
+  useEffect(() => setSelectedIds(new Set()), [state.video.id]);
+
+  const normalizedQuery = query.trim().toLowerCase();
+  const visibleItems = normalizedQuery
+    ? items.filter((item) => item.text.toLowerCase().includes(normalizedQuery))
+    : items;
+  const selectedItems = items
+    .filter((item) => selectedIds.has(item.id))
+    .sort((a, b) => a.startMs - b.startMs);
+  const totalWords = items.reduce((sum, item) => sum + wordsFromText(item.text).length, 0);
+
+  function updateItem(id: string, patch: Partial<TranscriptSegment>) {
+    setItems((current) => current.map((item) => item.id === id ? { ...item, ...patch, source: 'manual' } : item));
+  }
+
+  function toggleSelected(id: string) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function replaceMatches() {
+    if (!normalizedQuery) return;
+    const pattern = new RegExp(escapeRegExp(query.trim()), 'gi');
+    setItems((current) => current.map((item) => ({
+      ...item,
+      text: item.text.replace(pattern, replaceValue),
+      source: item.text.toLowerCase().includes(normalizedQuery) ? 'manual' : item.source
+    })));
+  }
+
+  function splitSegment(segment: TranscriptSegment, preferredMs?: number) {
+    const splitMs = splitPointForRange(segment.startMs, segment.endMs, preferredMs ?? (segment.startMs + segment.endMs) / 2);
+    if (splitMs === null) return;
+    const ratio = (splitMs - segment.startMs) / Math.max(1, segment.endMs - segment.startMs);
+    const [firstText, secondText] = splitSubtitleText(segment.text, ratio);
+    const secondId = clientId();
+    setItems((current) => current.flatMap((item) => item.id === segment.id
+      ? [
+        { ...item, text: firstText || item.text, endMs: splitMs, source: 'manual' as const },
+        { ...item, id: secondId, text: secondText || item.text, startMs: splitMs, source: 'manual' as const }
+      ]
+      : [item]));
+    setSelectedIds(new Set([secondId]));
+    onSeek(splitMs);
+  }
+
+  function mergeSelected() {
+    if (selectedItems.length < 2) return;
+    const merged: TranscriptSegment = {
+      ...selectedItems[0],
+      endMs: selectedItems[selectedItems.length - 1].endMs,
+      text: selectedItems.map((item) => item.text.trim()).filter(Boolean).join(' '),
+      source: 'manual'
+    };
+    const selected = new Set(selectedItems.map((item) => item.id));
+    setItems((current) => current.flatMap((item) => {
+      if (item.id === merged.id) return [merged];
+      return selected.has(item.id) ? [] : [item];
+    }).sort((a, b) => a.startMs - b.startMs));
+    setSelectedIds(new Set([merged.id]));
+    onSeek(merged.startMs);
+  }
+
+  function selectedRange() {
+    if (!selectedItems.length) return null;
+    return {
+      startMs: Math.min(...selectedItems.map((item) => item.startMs)),
+      endMs: Math.max(...selectedItems.map((item) => item.endMs)),
+      text: selectedItems.map((item) => item.text.trim()).filter(Boolean).join(' ')
+    };
+  }
+
+  function createSubtitlesFromSelection() {
+    const rows = selectedItems.length ? selectedItems : visibleItems.slice(0, 1);
+    if (!rows.length) return;
+    const style = completeSubtitleStyle(state.subtitles[0]?.style);
+    const newSubtitles = rows.map((item): SubtitleCue => ({
+      id: clientId(),
+      videoId: state.video.id,
+      startMs: item.startMs,
+      endMs: item.endMs,
+      text: item.text,
+      style
+    }));
+    void onSaveSubtitles([...state.subtitles, ...newSubtitles]);
+  }
+
+  function createZoomFromSelection() {
+    const range = selectedRange();
+    if (!range) return;
+    const event: TimelineEvent = {
+      id: clientId(),
+      videoId: state.video.id,
+      type: 'zoom',
+      startMs: range.startMs,
+      endMs: range.endMs,
+      enabled: true,
+      payload: { scale: 1.22 }
+    };
+    void onSaveTimeline([...state.timeline, event]);
+  }
+
+  function createOverlayFromSelection() {
+    const range = selectedRange();
+    const asset = state.assets[0];
+    if (!range || !asset) return;
+    const event: TimelineEvent = {
+      id: clientId(),
+      videoId: state.video.id,
+      type: 'image_overlay',
+      startMs: range.startMs,
+      endMs: range.endMs,
+      enabled: true,
+      payload: { assetId: asset.id }
+    };
+    void onSaveTimeline([...state.timeline, event]);
+  }
+
   return (
     <div className="editor-list">
       <PanelHead title="Transcript editable" action="Guardar" onAction={() => onSave(items)} />
-      {items.map((item, index) => (
-        <div key={item.id} className="text-row">
-          <button onClick={() => onSeek(item.startMs)}>{formatDuration(item.startMs)}</button>
-          <textarea value={item.text} onChange={(event) => setItems(items.map((row, rowIndex) => rowIndex === index ? { ...row, text: event.target.value, source: 'manual' } : row))} />
-        </div>
-      ))}
+      <div className="transcript-tools">
+        <input placeholder="Buscar palabra o frase" value={query} onChange={(event) => setQuery(event.target.value)} />
+        <input placeholder="Reemplazar por" value={replaceValue} onChange={(event) => setReplaceValue(event.target.value)} />
+        <button disabled={!normalizedQuery} onClick={replaceMatches}>Reemplazar</button>
+      </div>
+      <div className="transcript-actions">
+        <button disabled={!items.length} onClick={() => setSelectedIds(new Set(visibleItems.map((item) => item.id)))}>Seleccionar visibles</button>
+        <button disabled={!selectedIds.size} onClick={() => setSelectedIds(new Set())}>Limpiar</button>
+        <button disabled={!selectedIds.size} onClick={createSubtitlesFromSelection}>Crear subtitulos</button>
+        <button disabled={!selectedIds.size} onClick={createZoomFromSelection}>Crear zoom</button>
+        <button disabled={!selectedIds.size || !state.assets.length} onClick={createOverlayFromSelection}>Crear overlay</button>
+        <button disabled={selectedItems.length < 2} onClick={mergeSelected}>Unir</button>
+      </div>
+      <div className="transcript-summary">
+        <span>{items.length} segmentos</span>
+        <span>{totalWords} palabras</span>
+        <span>{selectedIds.size} seleccionados</span>
+      </div>
+      {visibleItems.map((item) => {
+        const words = wordsFromText(item.text);
+        const selected = selectedIds.has(item.id);
+        return (
+          <div key={item.id} className={`transcript-row ${selected ? 'is-selected' : ''}`}>
+            <div className="transcript-row-head">
+              <label>
+                <input type="checkbox" checked={selected} onChange={() => toggleSelected(item.id)} />
+                <span>{formatDuration(item.startMs)} - {formatDuration(item.endMs)}</span>
+              </label>
+              <div>
+                <button onClick={() => onSeek(item.startMs)}>Ir</button>
+                <button onClick={() => splitSegment(item)}>Dividir</button>
+              </div>
+            </div>
+            <div className="transcript-words">
+              {words.map((word, index) => (
+                <button
+                  key={`${item.id}-${index}-${word}`}
+                  className={normalizedQuery && word.toLowerCase().includes(normalizedQuery) ? 'is-match' : ''}
+                  onClick={() => onSeek(approxWordTime(item, index, words.length))}
+                >
+                  {word}
+                </button>
+              ))}
+            </div>
+            <textarea value={item.text} onChange={(event) => updateItem(item.id, { text: event.target.value })} />
+          </div>
+        );
+      })}
+      {!visibleItems.length && <div className="empty-inspector">No hay segmentos que coincidan.</div>}
     </div>
   );
 }
@@ -1978,6 +2166,19 @@ function tabLabel(tab: InspectorTab) {
 
 function parseWords(value: string) {
   return value.split(',').map((word) => word.trim()).filter(Boolean);
+}
+
+function wordsFromText(text: string) {
+  return text.trim().split(/\s+/).filter(Boolean);
+}
+
+function approxWordTime(segment: TranscriptSegment, wordIndex: number, totalWords: number) {
+  const ratio = totalWords <= 1 ? 0 : wordIndex / Math.max(1, totalWords - 1);
+  return Math.round(segment.startMs + ((segment.endMs - segment.startMs) * ratio));
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function previewAssetLayers(state: ApiState, currentMs: number, selection: SelectionTarget): PreviewAssetLayer[] {
