@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { env } from '../env.js';
 import { formatSeconds } from '../utils/time.js';
-import { SilenceSegment } from '../../shared/types.js';
+import { SilenceSegment, VideoThumbnail, WaveformPoint } from '../../shared/types.js';
 import { createId } from '../db/store.js';
 
 export interface ProbeResult {
@@ -101,6 +101,109 @@ export async function createProxy(inputPath: string, outputPath: string) {
     '128k',
     outputPath
   ]);
+}
+
+export async function createWaveform(inputPath: string, pcmPath: string, videoId: string, durationMs: number, sampleCount = 180) {
+  await fs.mkdir(path.dirname(pcmPath), { recursive: true });
+  try {
+    await runCommand(env.ffmpegPath, [
+      '-y',
+      '-i',
+      inputPath,
+      '-vn',
+      '-ac',
+      '1',
+      '-ar',
+      '8000',
+      '-acodec',
+      'pcm_s16le',
+      '-f',
+      's16le',
+      pcmPath
+    ]);
+  } catch {
+    return emptyWaveform(videoId, durationMs, sampleCount);
+  }
+
+  const buffer = await fs.readFile(pcmPath);
+  if (buffer.length < 2) return emptyWaveform(videoId, durationMs, sampleCount);
+  const sampleTotal = Math.floor(buffer.length / 2);
+  const bucketSize = Math.max(1, Math.ceil(sampleTotal / sampleCount));
+  const rows: WaveformPoint[] = [];
+  for (let index = 0; index < sampleCount; index += 1) {
+    const startSample = index * bucketSize;
+    const endSample = Math.min(sampleTotal, startSample + bucketSize);
+    let peak = 0;
+    for (let sampleIndex = startSample; sampleIndex < endSample; sampleIndex += 1) {
+      peak = Math.max(peak, Math.abs(buffer.readInt16LE(sampleIndex * 2)) / 32768);
+    }
+    const startMs = Math.round((index / sampleCount) * durationMs);
+    const endMs = Math.round(((index + 1) / sampleCount) * durationMs);
+    rows.push({
+      id: createId(),
+      videoId,
+      startMs,
+      endMs,
+      amplitude: Math.min(1, Math.max(0, Number(peak.toFixed(4))))
+    });
+  }
+  return rows;
+}
+
+export async function createThumbnails(
+  inputPath: string,
+  outputDir: string,
+  videoId: string,
+  durationMs: number,
+  sourceWidth: number,
+  sourceHeight: number,
+  count = 12
+) {
+  await fs.rm(outputDir, { recursive: true, force: true });
+  await fs.mkdir(outputDir, { recursive: true });
+  const height = sourceWidth > 0 && sourceHeight > 0 ? Math.max(2, Math.round(160 * (sourceHeight / sourceWidth))) : 90;
+  const rows: VideoThumbnail[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const timeMs = Math.max(0, Math.min(Math.max(0, durationMs - 1), Math.round(durationMs * ((index + 0.5) / count))));
+    const filePath = path.join(outputDir, `thumb-${String(index + 1).padStart(2, '0')}.jpg`);
+    try {
+      await runCommand(env.ffmpegPath, [
+        '-y',
+        '-ss',
+        formatSeconds(timeMs),
+        '-i',
+        inputPath,
+        '-frames:v',
+        '1',
+        '-vf',
+        'scale=160:-2',
+        '-q:v',
+        '5',
+        filePath
+      ]);
+      rows.push({
+        id: createId(),
+        videoId,
+        timeMs,
+        filePath,
+        width: 160,
+        height
+      });
+    } catch {
+      // A broken frame should not fail the whole editor state. The next frame often succeeds.
+    }
+  }
+  return rows;
+}
+
+function emptyWaveform(videoId: string, durationMs: number, sampleCount: number) {
+  return Array.from({ length: sampleCount }, (_, index): WaveformPoint => ({
+    id: createId(),
+    videoId,
+    startMs: Math.round((index / sampleCount) * durationMs),
+    endMs: Math.round(((index + 1) / sampleCount) * durationMs),
+    amplitude: 0
+  }));
 }
 
 export interface DetectSilenceOptions {

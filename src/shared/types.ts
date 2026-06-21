@@ -1,5 +1,5 @@
 export type VideoStatus = 'uploaded' | 'processing' | 'ready' | 'failed';
-export type JobType = 'ingest' | 'detect_silence' | 'transcribe' | 'render';
+export type JobType = 'ingest' | 'generate_waveform' | 'generate_thumbnails' | 'detect_silence' | 'transcribe' | 'render';
 export type JobStatus = 'queued' | 'running' | 'done' | 'failed';
 export type TimelineEventType = 'cut' | 'zoom' | 'image_overlay' | 'subtitle_style';
 
@@ -84,6 +84,23 @@ export interface ImageAsset {
   timingMode: 'word_match' | 'manual';
 }
 
+export interface WaveformPoint {
+  id: string;
+  videoId: string;
+  startMs: number;
+  endMs: number;
+  amplitude: number;
+}
+
+export interface VideoThumbnail {
+  id: string;
+  videoId: string;
+  timeMs: number;
+  filePath: string;
+  width: number;
+  height: number;
+}
+
 export interface TimelineEvent {
   id: string;
   videoId: string;
@@ -111,6 +128,8 @@ export interface EditorState {
   transcript: TranscriptSegment[];
   subtitles: SubtitleCue[];
   assets: ImageAsset[];
+  waveform: WaveformPoint[];
+  thumbnails: VideoThumbnail[];
   timeline: TimelineEvent[];
   renders: RenderRecord[];
 }
@@ -125,4 +144,3 @@ export const defaultSubtitleStyle: SubtitleStyle = {
   uppercase: false,
   position: 'bottom'
 };
-

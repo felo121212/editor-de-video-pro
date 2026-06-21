@@ -16,7 +16,9 @@ import {
   TimelineEvent,
   TranscriptSegment,
   VideoJob,
-  VideoProject
+  VideoProject,
+  VideoThumbnail,
+  WaveformPoint
 } from '../../shared/types.js';
 
 export interface Store {
@@ -42,6 +44,10 @@ export interface Store {
   updateAsset(id: string, patch: Partial<ImageAsset>): Promise<ImageAsset>;
   getAssets(videoId: string): Promise<ImageAsset[]>;
   deleteAsset(id: string): Promise<void>;
+  replaceWaveform(videoId: string, rows: WaveformPoint[]): Promise<WaveformPoint[]>;
+  getWaveform(videoId: string): Promise<WaveformPoint[]>;
+  replaceThumbnails(videoId: string, rows: VideoThumbnail[]): Promise<VideoThumbnail[]>;
+  getThumbnails(videoId: string): Promise<VideoThumbnail[]>;
   replaceTimeline(videoId: string, rows: TimelineEvent[]): Promise<TimelineEvent[]>;
   getTimeline(videoId: string): Promise<TimelineEvent[]>;
   createRender(input: Omit<RenderRecord, 'id' | 'createdAt'>): Promise<RenderRecord>;
@@ -56,6 +62,8 @@ interface JsonShape {
   transcript: TranscriptSegment[];
   subtitles: SubtitleCue[];
   assets: ImageAsset[];
+  waveform: WaveformPoint[];
+  thumbnails: VideoThumbnail[];
   timeline: TimelineEvent[];
   renders: RenderRecord[];
 }
@@ -67,6 +75,8 @@ const emptyDb = (): JsonShape => ({
   transcript: [],
   subtitles: [],
   assets: [],
+  waveform: [],
+  thumbnails: [],
   timeline: [],
   renders: []
 });
@@ -75,9 +85,10 @@ function id() {
   return nanoid(12);
 }
 
-function sortByTime<T extends { createdAt?: string; startMs?: number }>(items: T[]) {
+function sortByTime<T extends { createdAt?: string; startMs?: number; timeMs?: number }>(items: T[]) {
   return [...items].sort((a, b) => {
     if (a.startMs !== undefined && b.startMs !== undefined) return a.startMs - b.startMs;
+    if (a.timeMs !== undefined && b.timeMs !== undefined) return a.timeMs - b.timeMs;
     return String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? ''));
   });
 }
@@ -97,7 +108,8 @@ class JsonStore implements Store {
 
   private async read(): Promise<JsonShape> {
     await this.migrate();
-    return JSON.parse(await fs.readFile(this.file, 'utf8')) as JsonShape;
+    const parsed = JSON.parse(await fs.readFile(this.file, 'utf8')) as Partial<JsonShape>;
+    return { ...emptyDb(), ...parsed };
   }
 
   private async write(db: JsonShape) {
@@ -165,6 +177,8 @@ class JsonStore implements Store {
       db.transcript = db.transcript.filter((row) => row.videoId !== videoId);
       db.subtitles = db.subtitles.filter((row) => row.videoId !== videoId);
       db.assets = db.assets.filter((row) => row.videoId !== videoId);
+      db.waveform = db.waveform.filter((row) => row.videoId !== videoId);
+      db.thumbnails = db.thumbnails.filter((row) => row.videoId !== videoId);
       db.timeline = db.timeline.filter((row) => row.videoId !== videoId);
       db.renders = db.renders.filter((row) => row.videoId !== videoId);
     });
@@ -314,6 +328,30 @@ class JsonStore implements Store {
     });
   }
 
+  async replaceWaveform(videoId: string, rows: WaveformPoint[]) {
+    return this.tx((db) => {
+      db.waveform = db.waveform.filter((row) => row.videoId !== videoId).concat(rows);
+      return sortByTime(rows);
+    });
+  }
+
+  async getWaveform(videoId: string) {
+    const db = await this.read();
+    return sortByTime(db.waveform.filter((row) => row.videoId === videoId));
+  }
+
+  async replaceThumbnails(videoId: string, rows: VideoThumbnail[]) {
+    return this.tx((db) => {
+      db.thumbnails = db.thumbnails.filter((row) => row.videoId !== videoId).concat(rows);
+      return sortByTime(rows);
+    });
+  }
+
+  async getThumbnails(videoId: string) {
+    const db = await this.read();
+    return sortByTime(db.thumbnails.filter((row) => row.videoId === videoId));
+  }
+
   async replaceTimeline(videoId: string, rows: TimelineEvent[]) {
     return this.tx((db) => {
       db.timeline = db.timeline.filter((row) => row.videoId !== videoId).concat(rows);
@@ -349,6 +387,8 @@ class JsonStore implements Store {
       transcript: await this.getTranscript(videoId),
       subtitles: await this.getSubtitles(videoId),
       assets: await this.getAssets(videoId),
+      waveform: await this.getWaveform(videoId),
+      thumbnails: await this.getThumbnails(videoId),
       timeline: await this.getTimeline(videoId),
       renders: await this.listRenders(videoId)
     };
@@ -643,6 +683,51 @@ class MySqlStore implements Store {
     await this.pool.query('DELETE FROM image_assets WHERE id = ?', [assetId]);
   }
 
+  async replaceWaveform(videoId: string, rows: WaveformPoint[]) {
+    await this.pool.query('DELETE FROM waveform_points WHERE video_id = ?', [videoId]);
+    for (const row of rows) {
+      await this.pool.query(
+        'INSERT INTO waveform_points (id,video_id,start_ms,end_ms,amplitude) VALUES (?,?,?,?,?)',
+        [row.id, videoId, row.startMs, row.endMs, row.amplitude]
+      );
+    }
+    return this.getWaveform(videoId);
+  }
+
+  async getWaveform(videoId: string) {
+    const [rows] = await this.pool.query('SELECT * FROM waveform_points WHERE video_id = ? ORDER BY start_ms ASC', [videoId]);
+    return (rows as Record<string, any>[]).map((row) => ({
+      id: row.id,
+      videoId: row.video_id,
+      startMs: Number(row.start_ms),
+      endMs: Number(row.end_ms),
+      amplitude: Number(row.amplitude)
+    }));
+  }
+
+  async replaceThumbnails(videoId: string, rows: VideoThumbnail[]) {
+    await this.pool.query('DELETE FROM video_thumbnails WHERE video_id = ?', [videoId]);
+    for (const row of rows) {
+      await this.pool.query(
+        'INSERT INTO video_thumbnails (id,video_id,time_ms,file_path,width,height) VALUES (?,?,?,?,?,?)',
+        [row.id, videoId, row.timeMs, row.filePath, row.width, row.height]
+      );
+    }
+    return this.getThumbnails(videoId);
+  }
+
+  async getThumbnails(videoId: string) {
+    const [rows] = await this.pool.query('SELECT * FROM video_thumbnails WHERE video_id = ? ORDER BY time_ms ASC', [videoId]);
+    return (rows as Record<string, any>[]).map((row) => ({
+      id: row.id,
+      videoId: row.video_id,
+      timeMs: Number(row.time_ms),
+      filePath: row.file_path,
+      width: Number(row.width),
+      height: Number(row.height)
+    }));
+  }
+
   async replaceTimeline(videoId: string, rows: TimelineEvent[]) {
     await this.pool.query('DELETE FROM timeline_events WHERE video_id = ?', [videoId]);
     for (const row of rows) {
@@ -699,6 +784,8 @@ class MySqlStore implements Store {
       transcript: await this.getTranscript(videoId),
       subtitles: await this.getSubtitles(videoId),
       assets: await this.getAssets(videoId),
+      waveform: await this.getWaveform(videoId),
+      thumbnails: await this.getThumbnails(videoId),
       timeline: await this.getTimeline(videoId),
       renders: await this.listRenders(videoId)
     };

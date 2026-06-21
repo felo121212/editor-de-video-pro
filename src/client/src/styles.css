@@ -677,6 +677,23 @@ input[type="range"] {
     repeating-linear-gradient(90deg, rgba(139, 92, 246, 0.38) 0 34px, rgba(255, 255, 255, 0.08) 34px 36px, rgba(60, 45, 88, 0.72) 36px 70px);
 }
 
+.thumbnail-strip {
+  position: absolute;
+  inset: 4px;
+  display: flex;
+  gap: 2px;
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.thumbnail-strip img {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  object-fit: cover;
+  border-right: 1px solid rgba(255, 255, 255, 0.12);
+}
+
 .waveform {
   position: absolute;
   inset: 7px;
@@ -685,6 +702,24 @@ input[type="range"] {
     repeating-linear-gradient(90deg, rgba(22, 217, 155, 0.78) 0 2px, transparent 2px 5px),
     linear-gradient(180deg, transparent 0 32%, rgba(22, 217, 155, 0.22) 32% 68%, transparent 68%);
   opacity: 0.8;
+}
+
+.waveform-real {
+  position: absolute;
+  inset: 5px;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  border-radius: 5px;
+  background: linear-gradient(180deg, transparent 0 42%, rgba(22, 217, 155, 0.16) 42% 58%, transparent 58%);
+}
+
+.waveform-real i {
+  flex: 1 1 0;
+  min-width: 1px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(52, 211, 153, 0.95), rgba(20, 184, 166, 0.7));
+  box-shadow: 0 0 10px rgba(22, 217, 155, 0.18);
 }
 
 .segment {

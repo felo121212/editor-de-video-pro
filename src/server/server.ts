@@ -7,7 +7,7 @@ import path from 'node:path';
 import { env } from './env.js';
 import { createId, getStore } from './db/store.js';
 import { deleteVideoStorage, ensureStorage, ensureVideoDir, resolveMediaPath, sanitizeFileName } from './services/storage.service.js';
-import { presentAsset, presentEditorState, presentRender, presentVideo } from './services/presenter.js';
+import { presentAsset, presentEditorState, presentRender, presentThumbnail, presentVideo } from './services/presenter.js';
 import { defaultSubtitleStyle, ImageAsset, JobType, SilenceSegment, SubtitleCue, SubtitleStyle, TimelineEvent, TranscriptSegment } from '../shared/types.js';
 
 const app = express();
@@ -209,6 +209,23 @@ app.get('/api/videos/:id/assets', async (req, res, next) => {
   }
 });
 
+app.get('/api/videos/:id/waveform', async (req, res, next) => {
+  try {
+    res.json({ waveform: await store.getWaveform(req.params.id) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/videos/:id/thumbnails', async (req, res, next) => {
+  try {
+    const thumbnails = await store.getThumbnails(req.params.id);
+    res.json({ thumbnails: thumbnails.map(presentThumbnail) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.patch('/api/assets/:id', async (req, res, next) => {
   try {
     const patch: Partial<ImageAsset> = {};
@@ -279,6 +296,12 @@ app.listen(env.port, () => {
 function normalizeJobType(type: string): JobType | null {
   const map: Record<string, JobType> = {
     ingest: 'ingest',
+    waveform: 'generate_waveform',
+    'generate-waveform': 'generate_waveform',
+    generate_waveform: 'generate_waveform',
+    thumbnails: 'generate_thumbnails',
+    'generate-thumbnails': 'generate_thumbnails',
+    generate_thumbnails: 'generate_thumbnails',
     'detect-silence': 'detect_silence',
     detect_silence: 'detect_silence',
     transcribe: 'transcribe',

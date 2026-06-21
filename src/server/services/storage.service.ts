@@ -8,6 +8,7 @@ export async function ensureStorage() {
     fs.mkdir(env.storageDir, { recursive: true }),
     fs.mkdir(path.join(env.storageDir, 'uploads'), { recursive: true }),
     fs.mkdir(path.join(env.storageDir, 'proxies'), { recursive: true }),
+    fs.mkdir(path.join(env.storageDir, 'thumbnails'), { recursive: true }),
     fs.mkdir(path.join(env.storageDir, 'renders'), { recursive: true }),
     fs.mkdir(path.join(env.storageDir, 'assets'), { recursive: true }),
     fs.mkdir(path.join(env.storageDir, 'tmp'), { recursive: true }),
@@ -15,7 +16,7 @@ export async function ensureStorage() {
   ]);
 }
 
-export async function ensureVideoDir(kind: 'uploads' | 'proxies' | 'renders' | 'assets' | 'tmp', videoId: string) {
+export async function ensureVideoDir(kind: 'uploads' | 'proxies' | 'thumbnails' | 'renders' | 'assets' | 'tmp', videoId: string) {
   const dir = path.join(env.storageDir, kind, videoId);
   assertInside(env.storageDir, dir);
   await fs.mkdir(dir, { recursive: true });
@@ -23,7 +24,7 @@ export async function ensureVideoDir(kind: 'uploads' | 'proxies' | 'renders' | '
 }
 
 export async function deleteVideoStorage(videoId: string) {
-  await Promise.all(['uploads', 'proxies', 'renders', 'assets', 'tmp'].map(async (kind) => {
+  await Promise.all(['uploads', 'proxies', 'thumbnails', 'renders', 'assets', 'tmp'].map(async (kind) => {
     const dir = path.join(env.storageDir, kind, videoId);
     assertInside(env.storageDir, dir);
     await fs.rm(dir, { recursive: true, force: true });

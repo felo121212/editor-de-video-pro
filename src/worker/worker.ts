@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { env } from '../server/env.js';
 import { getStore } from '../server/db/store.js';
-import { createProxy, detectSilence, ffprobe } from '../server/services/ffmpeg.service.js';
+import { createProxy, createThumbnails, createWaveform, detectSilence, ffprobe } from '../server/services/ffmpeg.service.js';
 import { ensureStorage, ensureVideoDir } from '../server/services/storage.service.js';
 import { transcribe } from '../server/services/transcription.service.js';
 import { renderVideo } from '../server/services/render.service.js';
@@ -33,7 +33,32 @@ while (true) {
       const proxyPath = path.join(proxyDir, 'proxy-720p.mp4');
       await createProxy(video.originalPath, proxyPath);
       await store.updateVideo(video.id, { ...probe, proxyPath, status: 'ready' });
-      await store.updateJob(job.id, { status: 'done', progress: 100, result: { probe, proxyPath } });
+      await store.createJob(video.id, 'generate_waveform');
+      await store.createJob(video.id, 'generate_thumbnails');
+      await store.updateJob(job.id, { status: 'done', progress: 100, result: { probe, proxyPath, nextJobs: ['generate_waveform', 'generate_thumbnails'] } });
+      continue;
+    }
+
+    if (job.type === 'generate_waveform') {
+      const durationMs = video.durationMs || (await ffprobe(video.originalPath)).durationMs;
+      const tmpDir = await ensureVideoDir('tmp', video.id);
+      const pcmPath = path.join(tmpDir, 'waveform.pcm');
+      await store.updateJob(job.id, { progress: 35 });
+      const rows = await createWaveform(video.originalPath, pcmPath, video.id, durationMs, 180);
+      await store.replaceWaveform(video.id, rows);
+      await store.updateVideo(video.id, { status: 'ready' });
+      await store.updateJob(job.id, { status: 'done', progress: 100, result: { points: rows.length } });
+      continue;
+    }
+
+    if (job.type === 'generate_thumbnails') {
+      const probe = video.durationMs && video.width ? video : await ffprobe(video.originalPath);
+      const outputDir = await ensureVideoDir('thumbnails', video.id);
+      await store.updateJob(job.id, { progress: 35 });
+      const rows = await createThumbnails(video.originalPath, outputDir, video.id, probe.durationMs, probe.width, probe.height, 12);
+      await store.replaceThumbnails(video.id, rows);
+      await store.updateVideo(video.id, { status: 'ready' });
+      await store.updateJob(job.id, { status: 'done', progress: 100, result: { thumbnails: rows.length } });
       continue;
     }
 

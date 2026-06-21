@@ -1,4 +1,4 @@
-import { EditorState, ImageAsset, RenderRecord, VideoProject } from '../../shared/types.js';
+import { EditorState, ImageAsset, RenderRecord, VideoProject, VideoThumbnail } from '../../shared/types.js';
 import { publicMediaUrl } from './storage.service.js';
 
 export function presentVideo(video: VideoProject) {
@@ -24,12 +24,19 @@ export function presentRender(render: RenderRecord) {
   };
 }
 
+export function presentThumbnail(thumbnail: VideoThumbnail) {
+  return {
+    ...thumbnail,
+    fileUrl: publicMediaUrl(thumbnail.filePath)
+  };
+}
+
 export function presentEditorState(state: EditorState) {
   return {
     ...state,
     video: presentVideo(state.video),
     assets: state.assets.map(presentAsset),
+    thumbnails: state.thumbnails.map(presentThumbnail),
     renders: state.renders.map(presentRender)
   };
 }
-

@@ -77,6 +77,27 @@ CREATE TABLE IF NOT EXISTS image_assets (
   CONSTRAINT fk_assets_video FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS waveform_points (
+  id VARCHAR(32) PRIMARY KEY,
+  video_id VARCHAR(32) NOT NULL,
+  start_ms INT NOT NULL,
+  end_ms INT NOT NULL,
+  amplitude DOUBLE NOT NULL,
+  INDEX idx_waveform_video (video_id, start_ms),
+  CONSTRAINT fk_waveform_video FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS video_thumbnails (
+  id VARCHAR(32) PRIMARY KEY,
+  video_id VARCHAR(32) NOT NULL,
+  time_ms INT NOT NULL,
+  file_path TEXT NOT NULL,
+  width INT NOT NULL DEFAULT 0,
+  height INT NOT NULL DEFAULT 0,
+  INDEX idx_thumbnails_video (video_id, time_ms),
+  CONSTRAINT fk_thumbnails_video FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS timeline_events (
   id VARCHAR(32) PRIMARY KEY,
   video_id VARCHAR(32) NOT NULL,
@@ -100,4 +121,3 @@ CREATE TABLE IF NOT EXISTS renders (
   INDEX idx_renders_video (video_id),
   CONSTRAINT fk_renders_video FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
 );
-

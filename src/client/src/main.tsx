@@ -8,7 +8,9 @@ import {
   TimelineEvent,
   TranscriptSegment,
   VideoJob,
-  VideoProject
+  VideoProject,
+  VideoThumbnail,
+  WaveformPoint
 } from '../../shared/types';
 import './styles.css';
 
@@ -19,11 +21,13 @@ type ApiVideo = VideoProject & {
 };
 
 type ApiAsset = ImageAsset & { fileUrl: string | null };
+type ApiThumbnail = VideoThumbnail & { fileUrl: string | null };
 type ApiRender = { id: string; downloadUrl: string | null; createdAt: string; status: string };
 
-type ApiState = Omit<EditorState, 'video' | 'assets' | 'renders'> & {
+type ApiState = Omit<EditorState, 'video' | 'assets' | 'thumbnails' | 'renders'> & {
   video: ApiVideo;
   assets: ApiAsset[];
+  thumbnails: ApiThumbnail[];
   renders: ApiRender[];
 };
 
@@ -701,10 +705,18 @@ function Timeline({
           <b>{formatDuration(currentMs)}</b>
         </div>
         <Lane label="Video">
-          <div className="video-strip" />
+          {state.thumbnails.length ? (
+            <div className="thumbnail-strip">
+              {state.thumbnails.map((thumbnail) => (
+                <img key={thumbnail.id} src={thumbnail.fileUrl ?? ''} alt="" />
+              ))}
+            </div>
+          ) : (
+            <div className="video-strip" />
+          )}
         </Lane>
         <Lane label="Audio">
-          <div className="waveform" />
+          {state.waveform.length ? <Waveform points={state.waveform} /> : <div className="waveform" />}
         </Lane>
         <Lane label="Silencios">
           {state.silences.map((segment) => segmentButton({
@@ -763,6 +775,22 @@ function Lane({ label, children }: { label: string; children: React.ReactNode })
     <div className="lane">
       <span>{label}</span>
       <div>{children}</div>
+    </div>
+  );
+}
+
+function Waveform({ points }: { points: WaveformPoint[] }) {
+  const peak = Math.max(0.08, ...points.map((point) => point.amplitude));
+  return (
+    <div className="waveform-real">
+      {points.map((point) => (
+        <i
+          key={point.id}
+          style={{
+            height: `${Math.max(8, (point.amplitude / peak) * 100)}%`
+          }}
+        />
+      ))}
     </div>
   );
 }
@@ -1288,6 +1316,8 @@ function formatDate(value: string) {
 function jobLabel(type: string) {
   return {
     ingest: 'Preparando video',
+    generate_waveform: 'Waveform',
+    generate_thumbnails: 'Thumbnails',
     detect_silence: 'Silencios',
     transcribe: 'Transcripcion',
     render: 'Render'
