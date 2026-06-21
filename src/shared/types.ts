@@ -68,14 +68,26 @@ export interface SubtitleCue {
 }
 
 export interface SubtitleStyle {
+  preset: 'bold' | 'yellow' | 'neon' | 'pill' | 'minimal';
   fontFamily: string;
   fontSize: number;
   primaryColor: string;
   outlineColor: string;
   backColor: string;
+  outlineWidth: number;
+  shadow: number;
+  box: boolean;
   bold: boolean;
   uppercase: boolean;
   position: 'bottom' | 'middle' | 'top';
+}
+
+export interface SubtitleGenerationSettings {
+  wordsPerCue: number;
+  maxCharsPerCue: number;
+  minCueMs: number;
+  maxCueMs: number;
+  style: SubtitleStyle;
 }
 
 export interface ImageAsset {
@@ -143,11 +155,15 @@ export interface EditorState {
 }
 
 export const defaultSubtitleStyle: SubtitleStyle = {
+  preset: 'bold',
   fontFamily: 'Inter',
   fontSize: 48,
   primaryColor: '#ffffff',
   outlineColor: '#11101c',
   backColor: '#7c3aed',
+  outlineWidth: 3,
+  shadow: 1,
+  box: false,
   bold: true,
   uppercase: false,
   position: 'bottom'

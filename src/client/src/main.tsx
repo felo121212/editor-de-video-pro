@@ -1,10 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
+  defaultSubtitleStyle,
   EditorState,
   ImageAsset,
   SilenceSegment,
   SubtitleCue,
+  SubtitleGenerationSettings,
+  SubtitleStyle,
   TimelineEvent,
   TranscriptSegment,
   VideoJob,
@@ -51,6 +54,65 @@ const defaultSilenceDetectRequest: SilenceDetectRequest = {
   paddingBeforeMs: 80,
   paddingAfterMs: 120,
   preserveBreaths: true
+};
+
+const subtitlePresets: Record<SubtitleStyle['preset'], SubtitleStyle> = {
+  bold: {
+    ...defaultSubtitleStyle,
+    preset: 'bold',
+    primaryColor: '#ffffff',
+    outlineColor: '#080914',
+    backColor: '#7c3aed',
+    outlineWidth: 4,
+    shadow: 1,
+    box: false,
+    bold: true
+  },
+  yellow: {
+    ...defaultSubtitleStyle,
+    preset: 'yellow',
+    primaryColor: '#ffd84d',
+    outlineColor: '#120b03',
+    backColor: '#7c3aed',
+    outlineWidth: 4,
+    shadow: 2,
+    box: false,
+    bold: true,
+    uppercase: true
+  },
+  neon: {
+    ...defaultSubtitleStyle,
+    preset: 'neon',
+    primaryColor: '#ffffff',
+    outlineColor: '#16d99b',
+    backColor: '#7c3aed',
+    outlineWidth: 2,
+    shadow: 4,
+    box: false,
+    bold: true
+  },
+  pill: {
+    ...defaultSubtitleStyle,
+    preset: 'pill',
+    primaryColor: '#ffffff',
+    outlineColor: '#090b11',
+    backColor: '#7c3aed',
+    outlineWidth: 1,
+    shadow: 1,
+    box: true,
+    bold: true
+  },
+  minimal: {
+    ...defaultSubtitleStyle,
+    preset: 'minimal',
+    primaryColor: '#ffffff',
+    outlineColor: '#000000',
+    backColor: '#000000',
+    outlineWidth: 1,
+    shadow: 0,
+    box: false,
+    bold: false
+  }
 };
 
 const selectionTabs: Record<SelectionKind, InspectorTab> = {
@@ -107,6 +169,15 @@ const api = {
       body: JSON.stringify(payload)
     });
     if (!response.ok) throw new Error((await response.json()).error ?? 'Job failed');
+    return response.json();
+  },
+  async regenerateSubtitles(videoId: string, settings: SubtitleGenerationSettings) {
+    const response = await fetch(`/api/videos/${videoId}/subtitles/regenerate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(settings)
+    });
+    if (!response.ok) throw new Error((await response.json()).error ?? 'Subtitle regeneration failed');
     return response.json();
   },
   async patch<T>(url: string, items: T[]) {
@@ -249,6 +320,13 @@ function App() {
     });
   }
 
+  async function regenerateSubtitles(settings: SubtitleGenerationSettings) {
+    if (!state) return;
+    await runAction('Regenerando subtitulos', async () => {
+      await api.regenerateSubtitles(state.video.id, settings);
+    });
+  }
+
   async function saveSilences(items: SilenceSegment[]) {
     if (!state) return;
     await runAction('Guardando silencios', async () => {
@@ -355,6 +433,7 @@ function App() {
           onSeek={seek}
           onSaveTranscript={saveTranscript}
           onSaveSubtitles={saveSubtitles}
+          onRegenerateSubtitles={regenerateSubtitles}
           onSaveSilences={saveSilences}
           onSaveTimeline={saveTimeline}
           onUploadAsset={api.uploadAsset}
@@ -589,7 +668,14 @@ function PreviewPanel({
           ) : (
             <div className="video-placeholder">Procesando preview...</div>
           )}
-          {activeSubtitle && <div className="subtitle-preview">{activeSubtitle.text}</div>}
+          {activeSubtitle && (
+            <div
+              className={`subtitle-preview position-${activeSubtitle.style.position} ${activeSubtitle.style.box ? 'has-box' : ''}`}
+              style={subtitlePreviewStyle(activeSubtitle.style)}
+            >
+              {activeSubtitle.style.uppercase ? activeSubtitle.text.toUpperCase() : activeSubtitle.text}
+            </div>
+          )}
           {activeAssets.map((asset) => (
             <img
               key={asset.id}
@@ -869,6 +955,7 @@ function Inspector({
   onSeek,
   onSaveTranscript,
   onSaveSubtitles,
+  onRegenerateSubtitles,
   onSaveSilences,
   onSaveTimeline,
   onUploadAsset,
@@ -889,6 +976,7 @@ function Inspector({
   onSeek: (ms: number) => void;
   onSaveTranscript: (items: TranscriptSegment[]) => Promise<void>;
   onSaveSubtitles: (items: SubtitleCue[]) => Promise<void>;
+  onRegenerateSubtitles: (settings: SubtitleGenerationSettings) => Promise<void>;
   onSaveSilences: (items: SilenceSegment[]) => Promise<void>;
   onSaveTimeline: (items: TimelineEvent[]) => Promise<void>;
   onUploadAsset: (videoId: string, file: File, label: string, triggerWords: string) => Promise<unknown>;
@@ -931,7 +1019,7 @@ function Inspector({
             />
           )}
           {activeTab === 'transcript' && <TranscriptEditor state={state} onSave={onSaveTranscript} onSeek={onSeek} />}
-          {activeTab === 'subtitles' && <SubtitleEditor state={state} onSave={onSaveSubtitles} onSeek={onSeek} />}
+          {activeTab === 'subtitles' && <SubtitleEditor state={state} onSave={onSaveSubtitles} onRegenerate={onRegenerateSubtitles} onSeek={onSeek} />}
           {activeTab === 'silences' && <SilenceEditor state={state} busy={busy} onSave={onSaveSilences} onDetect={onDetectSilence} />}
           {activeTab === 'assets' && <AssetEditor state={state} onUploadAsset={onUploadAsset} onSaveAsset={onSaveAsset} onRefresh={onRefresh} />}
           {activeTab === 'zooms' && <ZoomEditor state={state} currentMs={currentMs} onSave={onSaveTimeline} />}
@@ -1154,23 +1242,94 @@ function TranscriptEditor({ state, onSave, onSeek }: { state: ApiState; onSave: 
   );
 }
 
-function SubtitleEditor({ state, onSave, onSeek }: { state: ApiState; onSave: (items: SubtitleCue[]) => Promise<void>; onSeek: (ms: number) => void }) {
+function SubtitleEditor({
+  state,
+  onSave,
+  onRegenerate,
+  onSeek
+}: {
+  state: ApiState;
+  onSave: (items: SubtitleCue[]) => Promise<void>;
+  onRegenerate: (settings: SubtitleGenerationSettings) => Promise<void>;
+  onSeek: (ms: number) => void;
+}) {
   const [items, setItems] = useState(state.subtitles);
+  const [wordsPerCue, setWordsPerCue] = useState(5);
+  const [maxCharsPerCue, setMaxCharsPerCue] = useState(34);
   useEffect(() => setItems(state.subtitles), [state.subtitles]);
+  const activeStyle = completeSubtitleStyle(items[0]?.style);
+  const previewText = items[0]?.text ?? 'Subtitulo premium';
+  const applyStyle = (patch: Partial<SubtitleStyle>) => {
+    setItems((current) => current.map((item) => ({
+      ...item,
+      style: completeSubtitleStyle({ ...item.style, ...patch })
+    })));
+  };
+  const applyPreset = (preset: SubtitleStyle['preset']) => {
+    const next = subtitlePresets[preset];
+    setItems((current) => current.map((item) => ({ ...item, style: next })));
+  };
+  const regenerate = () => onRegenerate({
+    wordsPerCue,
+    maxCharsPerCue,
+    minCueMs: 700,
+    maxCueMs: 2400,
+    style: activeStyle
+  });
   return (
     <div className="editor-list">
       <PanelHead title="Subtitulos" action="Guardar" onAction={() => onSave(items)} />
-      <div className="control-grid">
-        <button onClick={() => setItems(items.map((item) => ({ ...item, style: { ...item.style, position: 'top' } })))}>Top</button>
-        <button onClick={() => setItems(items.map((item) => ({ ...item, style: { ...item.style, position: 'bottom' } })))}>Bottom</button>
-        <button onClick={() => setItems(items.map((item) => ({ ...item, style: { ...item.style, uppercase: !item.style.uppercase } })))}>Uppercase</button>
+      <div className="subtitle-style-preview" style={subtitlePreviewStyle(activeStyle)}>
+        {activeStyle.uppercase ? previewText.toUpperCase() : previewText}
       </div>
-      <InspectorField label="Color">
-        <input type="color" value={items[0]?.style.primaryColor ?? '#ffffff'} onChange={(event) => setItems(items.map((item) => ({ ...item, style: { ...item.style, primaryColor: event.target.value } })))} />
+      <InspectorField label="Preset">
+        <select value={activeStyle.preset} onChange={(event) => applyPreset(event.target.value as SubtitleStyle['preset'])}>
+          <option value="bold">Bold blanco</option>
+          <option value="yellow">Amarillo punch</option>
+          <option value="neon">Neon Metamize</option>
+          <option value="pill">Pill morada</option>
+          <option value="minimal">Minimal</option>
+        </select>
+      </InspectorField>
+      <div className="control-grid">
+        <button className={activeStyle.position === 'top' ? 'is-active' : ''} onClick={() => applyStyle({ position: 'top' })}>Top</button>
+        <button className={activeStyle.position === 'middle' ? 'is-active' : ''} onClick={() => applyStyle({ position: 'middle' })}>Middle</button>
+        <button className={activeStyle.position === 'bottom' ? 'is-active' : ''} onClick={() => applyStyle({ position: 'bottom' })}>Bottom</button>
+      </div>
+      <InspectorField label="Tamano">
+        <input type="range" min="24" max="88" value={activeStyle.fontSize} onChange={(event) => applyStyle({ fontSize: Number(event.target.value) })} />
+        <strong>{activeStyle.fontSize}px</strong>
+      </InspectorField>
+      <InspectorField label="Texto">
+        <input type="color" value={activeStyle.primaryColor} onChange={(event) => applyStyle({ primaryColor: event.target.value })} />
+        <strong>{activeStyle.primaryColor}</strong>
+      </InspectorField>
+      <InspectorField label="Stroke">
+        <input type="color" value={activeStyle.outlineColor} onChange={(event) => applyStyle({ outlineColor: event.target.value })} />
+        <strong>{activeStyle.outlineWidth}px</strong>
+      </InspectorField>
+      <InspectorField label="Grosor">
+        <input type="range" min="0" max="8" step="0.5" value={activeStyle.outlineWidth} onChange={(event) => applyStyle({ outlineWidth: Number(event.target.value) })} />
+        <strong>{activeStyle.outlineWidth.toFixed(1)}</strong>
       </InspectorField>
       <InspectorField label="Fondo">
-        <input type="color" value={items[0]?.style.backColor ?? '#7c3aed'} onChange={(event) => setItems(items.map((item) => ({ ...item, style: { ...item.style, backColor: event.target.value } })))} />
+        <input type="color" value={activeStyle.backColor} onChange={(event) => applyStyle({ backColor: event.target.value })} />
+        <strong>{activeStyle.box ? 'box' : 'off'}</strong>
       </InspectorField>
+      <div className="control-grid">
+        <button className={activeStyle.uppercase ? 'is-active' : ''} onClick={() => applyStyle({ uppercase: !activeStyle.uppercase })}>Uppercase</button>
+        <button className={activeStyle.box ? 'is-active' : ''} onClick={() => applyStyle({ box: !activeStyle.box })}>Caja</button>
+        <button className={activeStyle.bold ? 'is-active' : ''} onClick={() => applyStyle({ bold: !activeStyle.bold })}>Bold</button>
+      </div>
+      <InspectorField label="Palabras">
+        <input type="range" min="2" max="9" value={wordsPerCue} onChange={(event) => setWordsPerCue(Number(event.target.value))} />
+        <strong>{wordsPerCue}/cue</strong>
+      </InspectorField>
+      <InspectorField label="Caracteres">
+        <input type="range" min="10" max="80" value={maxCharsPerCue} onChange={(event) => setMaxCharsPerCue(Number(event.target.value))} />
+        <strong>{maxCharsPerCue}</strong>
+      </InspectorField>
+      <button disabled={!state.transcript.length} onClick={regenerate}>Regenerar desde transcript</button>
       {items.map((item, index) => (
         <div key={item.id} className="text-row compact">
           <button onClick={() => onSeek(item.startMs)}>{formatDuration(item.startMs)}</button>
@@ -1448,6 +1607,36 @@ function readLatestSilenceSettings(jobs: VideoJob[]): SilenceDetectRequest {
   };
 }
 
+function completeSubtitleStyle(style?: Partial<SubtitleStyle>): SubtitleStyle {
+  const preset: SubtitleStyle['preset'] = style?.preset === 'yellow' || style?.preset === 'neon' || style?.preset === 'pill' || style?.preset === 'minimal'
+    ? style.preset
+    : 'bold';
+  return {
+    ...defaultSubtitleStyle,
+    ...style,
+    preset,
+    fontSize: finiteNumber(style?.fontSize, defaultSubtitleStyle.fontSize),
+    outlineWidth: finiteNumber(style?.outlineWidth, defaultSubtitleStyle.outlineWidth),
+    shadow: finiteNumber(style?.shadow, defaultSubtitleStyle.shadow),
+    box: style?.box === true,
+    position: style?.position === 'top' || style?.position === 'middle' ? style.position : 'bottom'
+  };
+}
+
+function subtitlePreviewStyle(source: Partial<SubtitleStyle>): React.CSSProperties {
+  const style = completeSubtitleStyle(source);
+  const stroke = Math.max(0, style.outlineWidth * 0.45);
+  return {
+    fontFamily: `${style.fontFamily}, Inter, Arial, sans-serif`,
+    fontSize: `clamp(18px, ${Math.max(1.4, style.fontSize / 25)}vw, ${Math.round(style.fontSize * 0.8)}px)`,
+    color: style.primaryColor,
+    backgroundColor: style.box ? hexToRgba(style.backColor, 0.88) : 'transparent',
+    fontWeight: style.bold ? 900 : 700,
+    WebkitTextStroke: stroke ? `${stroke}px ${style.outlineColor}` : undefined,
+    textShadow: style.shadow ? `0 ${style.shadow}px ${style.shadow * 5}px ${hexToRgba(style.outlineColor, 0.72)}` : undefined
+  };
+}
+
 function initialInspectorTab(): InspectorTab {
   const tab = new URLSearchParams(window.location.search).get('tab');
   return tab === 'subtitles' || tab === 'silences' || tab === 'assets' || tab === 'zooms' ? tab : 'transcript';
@@ -1500,6 +1689,14 @@ function clientId() {
 function finiteNumber(value: unknown, fallback: number) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function hexToRgba(hex: string, alpha: number) {
+  const clean = hex.replace('#', '').padEnd(6, '0').slice(0, 6);
+  const r = parseInt(clean.slice(0, 2), 16);
+  const g = parseInt(clean.slice(2, 4), 16);
+  const b = parseInt(clean.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${Math.min(1, Math.max(0, alpha))})`;
 }
 
 createRoot(document.getElementById('root')!).render(<App />);

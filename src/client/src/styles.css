@@ -619,18 +619,32 @@ input[type="range"] {
 .subtitle-preview {
   position: absolute;
   left: 50%;
-  bottom: 12%;
   transform: translateX(-50%);
   width: max-content;
   max-width: 84%;
   padding: 9px 15px;
-  border-radius: 7px;
-  background: rgba(0, 0, 0, 0.74);
-  color: white;
-  font-size: clamp(18px, 2.1vw, 34px);
-  font-weight: 900;
+  border-radius: 8px;
   text-align: center;
-  text-shadow: 0 2px 0 #05060a;
+  line-height: 1.08;
+  letter-spacing: 0;
+  pointer-events: none;
+}
+
+.subtitle-preview.position-bottom {
+  bottom: 12%;
+}
+
+.subtitle-preview.position-middle {
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.subtitle-preview.position-top {
+  top: 12%;
+}
+
+.subtitle-preview.has-box {
+  padding: 10px 18px;
 }
 
 .asset-preview {
@@ -1072,6 +1086,12 @@ select {
   gap: 8px;
 }
 
+.control-grid button.is-active {
+  border-color: var(--line-strong);
+  background: rgba(139, 92, 246, 0.24);
+  color: #f5efff;
+}
+
 .inspector-field {
   display: grid;
   grid-template-columns: 105px 1fr;
@@ -1086,6 +1106,20 @@ select {
   grid-template-columns: 1fr auto;
   gap: 8px;
   align-items: center;
+}
+
+.subtitle-style-preview {
+  min-height: 76px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 16px;
+  background:
+    linear-gradient(135deg, rgba(139, 92, 246, 0.08), rgba(22, 217, 155, 0.06)),
+    #080b11;
+  text-align: center;
+  line-height: 1.08;
 }
 
 .toggle-row {

@@ -4,7 +4,7 @@ import { env } from '../env.js';
 import { createId } from '../db/store.js';
 import { extractAudio } from './ffmpeg.service.js';
 import { ensureVideoDir } from './storage.service.js';
-import { defaultSubtitleStyle, SubtitleCue, TranscriptSegment, VideoProject } from '../../shared/types.js';
+import { defaultSubtitleStyle, SubtitleCue, SubtitleGenerationSettings, TranscriptSegment, VideoProject } from '../../shared/types.js';
 
 interface TranscriptionSegment {
   start?: number;
@@ -71,8 +71,15 @@ export async function transcribe(video: VideoProject) {
   return { transcript, subtitles: transcriptToSubtitles(transcript), warning: null };
 }
 
-export function transcriptToSubtitles(transcript: TranscriptSegment[]): SubtitleCue[] {
-  return transcript.flatMap((segment) => splitSegmentIntoSubtitleCues(segment));
+export function transcriptToSubtitles(transcript: TranscriptSegment[], options: Partial<SubtitleGenerationSettings> = {}): SubtitleCue[] {
+  const settings: SubtitleGenerationSettings = {
+    wordsPerCue: clampInt(options.wordsPerCue, 2, 9, 5),
+    maxCharsPerCue: clampInt(options.maxCharsPerCue, 10, 80, 34),
+    minCueMs: clampInt(options.minCueMs, 350, 3000, 700),
+    maxCueMs: clampInt(options.maxCueMs, 900, 7000, 2400),
+    style: options.style ?? defaultSubtitleStyle
+  };
+  return transcript.flatMap((segment) => splitSegmentIntoSubtitleCues(segment, settings));
 }
 
 function segmentsToTranscript(videoId: string, segments: TranscriptionSegment[]): TranscriptSegment[] {
@@ -109,28 +116,52 @@ function wordsToTranscript(videoId: string, words: TranscriptionWord[]): Transcr
   return rows;
 }
 
-function splitSegmentIntoSubtitleCues(segment: TranscriptSegment): SubtitleCue[] {
+function splitSegmentIntoSubtitleCues(segment: TranscriptSegment, settings: SubtitleGenerationSettings): SubtitleCue[] {
   const words = segment.text.split(/\s+/).filter(Boolean);
   if (!words.length) return [];
-  const cueSize = words.length <= 7 ? words.length : 5;
   const duration = Math.max(segment.endMs - segment.startMs, 1200);
+  const chunks = chunkWords(words, settings.wordsPerCue, settings.maxCharsPerCue);
   const cues: SubtitleCue[] = [];
-  for (let index = 0; index < words.length; index += cueSize) {
-    const chunk = words.slice(index, index + cueSize);
-    const startRatio = index / words.length;
-    const endRatio = Math.min(1, (index + chunk.length) / words.length);
+  let usedWords = 0;
+  for (const chunk of chunks) {
+    const startRatio = usedWords / words.length;
+    const endRatio = Math.min(1, (usedWords + chunk.length) / words.length);
     const startMs = Math.round(segment.startMs + duration * startRatio);
-    const endMs = Math.max(startMs + 700, Math.round(segment.startMs + duration * endRatio));
+    const rawEndMs = Math.round(segment.startMs + duration * endRatio);
+    const endMs = Math.min(segment.endMs, Math.max(startMs + settings.minCueMs, Math.min(startMs + settings.maxCueMs, rawEndMs)));
     cues.push({
       id: createId(),
       videoId: segment.videoId,
       startMs,
       endMs,
       text: chunk.join(' '),
-      style: defaultSubtitleStyle
+      style: settings.style
     });
+    usedWords += chunk.length;
   }
   return cues;
+}
+
+function chunkWords(words: string[], wordsPerCue: number, maxCharsPerCue: number) {
+  const chunks: string[][] = [];
+  let current: string[] = [];
+  for (const word of words) {
+    const next = [...current, word];
+    if (current.length && (next.length > wordsPerCue || next.join(' ').length > maxCharsPerCue)) {
+      chunks.push(current);
+      current = [word];
+    } else {
+      current = next;
+    }
+  }
+  if (current.length) chunks.push(current);
+  return chunks;
+}
+
+function clampInt(value: unknown, min: number, max: number, fallback: number) {
+  const number = Math.round(Number(value));
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, number));
 }
 
 function makeFallbackTranscript(video: VideoProject, text = 'Transcripcion pendiente. Escribi aca el texto real y ajusta los tiempos desde el editor.') {

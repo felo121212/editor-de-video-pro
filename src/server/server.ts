@@ -8,7 +8,8 @@ import { env } from './env.js';
 import { createId, getStore } from './db/store.js';
 import { deleteVideoStorage, ensureStorage, ensureVideoDir, resolveMediaPath, sanitizeFileName } from './services/storage.service.js';
 import { presentAsset, presentEditorState, presentRender, presentThumbnail, presentVideo } from './services/presenter.js';
-import { defaultSubtitleStyle, ImageAsset, JobType, SilenceSegment, SubtitleCue, SubtitleStyle, TimelineEvent, TranscriptSegment } from '../shared/types.js';
+import { transcriptToSubtitles } from './services/transcription.service.js';
+import { defaultSubtitleStyle, ImageAsset, JobType, SilenceSegment, SubtitleCue, SubtitleGenerationSettings, SubtitleStyle, TimelineEvent, TranscriptSegment } from '../shared/types.js';
 
 const app = express();
 const store = getStore();
@@ -161,6 +162,20 @@ app.patch('/api/videos/:id/transcript', async (req, res, next) => {
 app.get('/api/videos/:id/subtitles', async (req, res, next) => {
   try {
     res.json({ subtitles: await store.getSubtitles(req.params.id) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/videos/:id/subtitles/regenerate', async (req, res, next) => {
+  try {
+    const video = await store.getVideo(req.params.id);
+    if (!video) return res.status(404).json({ error: 'Video not found' });
+    const transcript = await store.getTranscript(video.id);
+    if (!transcript.length) return res.status(400).json({ error: 'Transcript is empty' });
+    const settings = sanitizeSubtitleGenerationSettings(req.body ?? {});
+    const subtitles = transcriptToSubtitles(transcript, settings);
+    res.json({ subtitles: await store.replaceSubtitles(video.id, subtitles), settings });
   } catch (error) {
     next(error);
   }
@@ -435,16 +450,34 @@ function sanitizePosition(value: unknown) {
 function sanitizeSubtitleStyle(value: unknown): SubtitleStyle {
   const source = value && typeof value === 'object' ? value as Record<string, unknown> : {};
   const position: SubtitleStyle['position'] = source.position === 'top' || source.position === 'middle' ? source.position : 'bottom';
+  const preset: SubtitleStyle['preset'] = source.preset === 'yellow' || source.preset === 'neon' || source.preset === 'pill' || source.preset === 'minimal'
+    ? source.preset
+    : 'bold';
   return {
     ...defaultSubtitleStyle,
+    preset,
     fontFamily: cleanText(source.fontFamily ?? defaultSubtitleStyle.fontFamily, 40) || defaultSubtitleStyle.fontFamily,
     fontSize: clampNumber(source.fontSize, 16, 96, defaultSubtitleStyle.fontSize),
     primaryColor: cleanHexColor(source.primaryColor, defaultSubtitleStyle.primaryColor),
     outlineColor: cleanHexColor(source.outlineColor, defaultSubtitleStyle.outlineColor),
     backColor: cleanHexColor(source.backColor, defaultSubtitleStyle.backColor),
+    outlineWidth: clampNumber(source.outlineWidth, 0, 8, defaultSubtitleStyle.outlineWidth),
+    shadow: clampNumber(source.shadow, 0, 8, defaultSubtitleStyle.shadow),
+    box: source.box === true,
     bold: source.bold !== false,
     uppercase: source.uppercase === true,
     position
+  };
+}
+
+function sanitizeSubtitleGenerationSettings(value: unknown): SubtitleGenerationSettings {
+  const source = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  return {
+    wordsPerCue: clampNumber(source.wordsPerCue, 2, 9, 5),
+    maxCharsPerCue: clampNumber(source.maxCharsPerCue, 10, 80, 34),
+    minCueMs: clampNumber(source.minCueMs, 350, 3000, 700),
+    maxCueMs: clampNumber(source.maxCueMs, 900, 7000, 2400),
+    style: sanitizeSubtitleStyle(source.style)
   };
 }
 
