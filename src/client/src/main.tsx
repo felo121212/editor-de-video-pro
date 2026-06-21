@@ -35,11 +35,16 @@ type ApiState = Omit<EditorState, 'video' | 'assets' | 'thumbnails' | 'renders'>
 };
 
 type InspectorTab = 'transcript' | 'subtitles' | 'silences' | 'assets' | 'zooms';
-type AspectRatio = '9:16' | '1:1' | '16:9';
+type AspectRatio = '9:16' | '4:5' | '1:1' | '16:9';
 type SelectionKind = 'silence' | 'subtitle' | 'asset' | 'zoom' | 'image_overlay';
 type SelectionTarget = { kind: SelectionKind; id: string } | null;
 type DragMode = 'move' | 'start' | 'end';
 type PipelineStepKey = 'ingest' | 'generate_waveform' | 'generate_thumbnails' | 'detect_silence' | 'transcribe';
+type PreviewAssetLayer = {
+  id: string;
+  asset: ApiAsset;
+  selection: NonNullable<SelectionTarget>;
+};
 type EditorHistorySnapshot = {
   silences: SilenceSegment[];
   subtitles: SubtitleCue[];
@@ -63,6 +68,13 @@ const defaultSilenceDetectRequest: SilenceDetectRequest = {
 
 const timelineLabelWidth = 150;
 const timelineRightPad = 12;
+
+const aspectPresets: Record<AspectRatio, { label: string; resolution: string; width: number; height: number }> = {
+  '9:16': { label: '9:16', resolution: '1080x1920', width: 1080, height: 1920 },
+  '4:5': { label: '4:5', resolution: '1080x1350', width: 1080, height: 1350 },
+  '1:1': { label: '1:1', resolution: '1080x1080', width: 1080, height: 1080 },
+  '16:9': { label: '16:9', resolution: '1920x1080', width: 1920, height: 1080 }
+};
 
 const subtitlePresets: Record<SubtitleStyle['preset'], SubtitleStyle> = {
   bold: {
@@ -280,15 +292,12 @@ function App() {
     if (!state) return null;
     return state.subtitles.find((cue) => currentMs >= cue.startMs && currentMs <= cue.endMs) ?? null;
   }, [state, currentMs]);
-  const activeAssets = useMemo(() => {
-    if (!state) return [];
-    const segment = state.transcript.find((item) => currentMs >= item.startMs && currentMs <= item.endMs);
-    const lower = segment?.text.toLowerCase() ?? '';
-    const triggered = lower ? state.assets.filter((asset) => asset.triggerWords.some((word) => lower.includes(word.toLowerCase()))) : [];
-    const selectedAsset = selection?.kind === 'asset' ? state.assets.find((asset) => asset.id === selection.id) : null;
-    if (!selectedAsset || triggered.some((asset) => asset.id === selectedAsset.id)) return triggered;
-    return [selectedAsset, ...triggered];
-  }, [state, currentMs, selection]);
+  const activePreviewAssets = useMemo(() => (
+    state ? previewAssetLayers(state, currentMs, selection) : []
+  ), [state, currentMs, selection]);
+  const activeZoomScale = useMemo(() => (
+    state ? previewZoomScale(state.timeline, currentMs, selection) : 1
+  ), [state, currentMs, selection]);
 
   function selectTarget(target: SelectionTarget) {
     setSelection(target);
@@ -552,7 +561,7 @@ function App() {
           await api.enqueue(state.video.id, 'transcribe');
         })}
         onRender={() => state && runAction('Renderizando', async () => {
-          await api.enqueue(state.video.id, 'render');
+          await api.enqueue(state.video.id, 'render', { aspectRatio: aspect, resolution: aspectPresets[aspect].resolution });
         })}
       />
 
@@ -588,11 +597,16 @@ function App() {
                 currentMs={currentMs}
                 aspect={aspect}
                 activeSubtitle={activeSubtitle}
-                activeAssets={activeAssets}
+                activeAssets={activePreviewAssets}
+                activeZoomScale={activeZoomScale}
                 selection={selection}
                 onSelect={selectTarget}
                 onSeek={seek}
                 onTimeUpdate={setCurrentMs}
+                onSaveAsset={async (asset) => {
+                  await api.patchAsset(asset);
+                  await refresh(state.video.id);
+                }}
               />
               <Timeline
                 state={state}
@@ -679,9 +693,9 @@ function TopBar({
       </div>
       <div className="top-actions">
         <div className="aspect-switch" aria-label="Aspect ratio">
-          {(['9:16', '1:1', '16:9'] as AspectRatio[]).map((item) => (
+          {(Object.keys(aspectPresets) as AspectRatio[]).map((item) => (
             <button key={item} className={aspect === item ? 'is-active' : ''} onClick={() => setAspect(item)}>
-              {item}
+              {aspectPresets[item].label}
             </button>
           ))}
         </div>
@@ -828,10 +842,12 @@ function PreviewPanel({
   aspect,
   activeSubtitle,
   activeAssets,
+  activeZoomScale,
   selection,
   onSelect,
   onSeek,
-  onTimeUpdate
+  onTimeUpdate,
+  onSaveAsset
 }: {
   state: ApiState;
   mediaUrl: string;
@@ -839,12 +855,59 @@ function PreviewPanel({
   currentMs: number;
   aspect: AspectRatio;
   activeSubtitle: SubtitleCue | null;
-  activeAssets: ApiAsset[];
+  activeAssets: PreviewAssetLayer[];
+  activeZoomScale: number;
   selection: SelectionTarget;
   onSelect: (target: SelectionTarget) => void;
   onSeek: (ms: number) => void;
   onTimeUpdate: (ms: number) => void;
+  onSaveAsset: (asset: ApiAsset) => Promise<void>;
 }) {
+  const frameRef = useRef<HTMLDivElement | null>(null);
+  const [dragDraft, setDragDraft] = useState<Record<string, ApiAsset['position']>>({});
+  const preset = aspectPresets[aspect];
+  const zoomScale = clamp(activeZoomScale, 1, 2.5);
+
+  function layerPosition(layer: PreviewAssetLayer) {
+    return dragDraft[layer.asset.id] ?? layer.asset.position;
+  }
+
+  function startAssetDrag(event: React.PointerEvent<HTMLImageElement>, layer: PreviewAssetLayer) {
+    event.preventDefault();
+    event.stopPropagation();
+    onSelect(layer.selection);
+    if (event.button !== 0 || !frameRef.current) return;
+    const rect = frameRef.current.getBoundingClientRect();
+    const original = layerPosition(layer);
+    let latest = original;
+
+    const update = (clientX: number, clientY: number) => {
+      latest = {
+        ...original,
+        x: clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1),
+        y: clamp((clientY - rect.top) / Math.max(1, rect.height), 0, 1)
+      };
+      setDragDraft((current) => ({ ...current, [layer.asset.id]: latest }));
+    };
+
+    const handleMove = (moveEvent: PointerEvent) => update(moveEvent.clientX, moveEvent.clientY);
+    const handleUp = () => {
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+      void onSaveAsset({ ...layer.asset, position: latest }).finally(() => {
+        setDragDraft((current) => {
+          const next = { ...current };
+          delete next[layer.asset.id];
+          return next;
+        });
+      });
+    };
+
+    update(event.clientX, event.clientY);
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp, { once: true });
+  }
+
   return (
     <section className="preview-panel">
       <nav className="workspace-tabs">
@@ -853,17 +916,29 @@ function PreviewPanel({
         ))}
       </nav>
       <div className="preview-stage">
-        <span className="resolution-chip">{aspect === '9:16' ? '1080x1920' : aspect === '1:1' ? '1080x1080' : '1920x1080'}</span>
-        <div className={`video-frame aspect-${aspect.replace(':', '-')}`}>
+        <span className="resolution-chip">{preset.resolution}</span>
+        <div
+          ref={frameRef}
+          className={`video-frame aspect-${aspect.replace(':', '-')}`}
+          style={{ '--zoom-scale': zoomScale } as React.CSSProperties}
+        >
           {mediaUrl ? (
-            <video
-              ref={videoRef}
-              src={mediaUrl}
-              onTimeUpdate={(event) => onTimeUpdate(event.currentTarget.currentTime * 1000)}
-            />
+            <div className="video-layer">
+              <video
+                ref={videoRef}
+                src={mediaUrl}
+                onTimeUpdate={(event) => onTimeUpdate(event.currentTarget.currentTime * 1000)}
+              />
+            </div>
           ) : (
             <div className="video-placeholder">Procesando preview...</div>
           )}
+          <div className="safe-guides" aria-hidden="true">
+            <i className="safe-action" />
+            <i className="safe-title" />
+            <b />
+          </div>
+          {zoomScale > 1.01 && <span className="zoom-preview-chip">{zoomScale.toFixed(2)}x</span>}
           {activeSubtitle && (
             <div
               className={`subtitle-preview position-${activeSubtitle.style.position} ${activeSubtitle.style.box ? 'has-box' : ''}`}
@@ -872,19 +947,23 @@ function PreviewPanel({
               {activeSubtitle.style.uppercase ? activeSubtitle.text.toUpperCase() : activeSubtitle.text}
             </div>
           )}
-          {activeAssets.map((asset) => (
-            <img
-              key={asset.id}
-              className={`asset-preview ${selection?.kind === 'asset' && selection.id === asset.id ? 'is-selected' : ''}`}
-              src={asset.fileUrl ?? ''}
-              onClick={() => onSelect({ kind: 'asset', id: asset.id })}
-              style={{
-                left: `${asset.position.x * 100}%`,
-                top: `${asset.position.y * 100}%`,
-                transform: `translate(-50%, -50%) scale(${asset.position.scale})`
-              }}
-            />
-          ))}
+          {activeAssets.map((layer) => {
+            const position = layerPosition(layer);
+            const isSelected = selection?.kind === layer.selection.kind && selection.id === layer.selection.id;
+            return (
+              <img
+                key={layer.id}
+                className={`asset-preview ${isSelected ? 'is-selected' : ''}`}
+                src={layer.asset.fileUrl ?? ''}
+                onPointerDown={(event) => startAssetDrag(event, layer)}
+                style={{
+                  left: `${position.x * 100}%`,
+                  top: `${position.y * 100}%`,
+                  transform: `translate(-50%, -50%) scale(${position.scale})`
+                }}
+              />
+            );
+          })}
         </div>
       </div>
       <div className="transport">
@@ -1899,6 +1978,56 @@ function tabLabel(tab: InspectorTab) {
 
 function parseWords(value: string) {
   return value.split(',').map((word) => word.trim()).filter(Boolean);
+}
+
+function previewAssetLayers(state: ApiState, currentMs: number, selection: SelectionTarget): PreviewAssetLayer[] {
+  const byAsset = new Map<string, PreviewAssetLayer>();
+  const addLayer = (asset: ApiAsset | undefined, target: NonNullable<SelectionTarget>) => {
+    if (!asset?.fileUrl) return;
+    const current = byAsset.get(asset.id);
+    const targetSelected = selection?.kind === target.kind && selection.id === target.id;
+    if (!current || targetSelected) {
+      byAsset.set(asset.id, { id: `${target.kind}-${target.id}`, asset, selection: target });
+    }
+  };
+
+  for (const event of state.timeline.filter((item) => item.type === 'image_overlay' && item.enabled)) {
+    if (currentMs < event.startMs || currentMs > event.endMs) continue;
+    const asset = state.assets.find((item) => item.id === event.payload.assetId);
+    addLayer(asset, { kind: 'image_overlay', id: event.id });
+  }
+
+  const activeSegment = state.transcript.find((item) => currentMs >= item.startMs && currentMs <= item.endMs);
+  const lower = activeSegment?.text.toLowerCase() ?? '';
+  if (lower) {
+    for (const asset of state.assets.filter((item) => item.timingMode === 'word_match')) {
+      if (asset.triggerWords.some((word) => lower.includes(word.toLowerCase()))) {
+        addLayer(asset, { kind: 'asset', id: asset.id });
+      }
+    }
+  }
+
+  if (selection?.kind === 'asset') {
+    addLayer(state.assets.find((asset) => asset.id === selection.id), { kind: 'asset', id: selection.id });
+  }
+  if (selection?.kind === 'image_overlay') {
+    const event = state.timeline.find((item) => item.id === selection.id && item.type === 'image_overlay');
+    const asset = state.assets.find((item) => item.id === event?.payload.assetId);
+    addLayer(asset, { kind: 'image_overlay', id: selection.id });
+  }
+
+  return Array.from(byAsset.values());
+}
+
+function previewZoomScale(timeline: TimelineEvent[], currentMs: number, selection: SelectionTarget) {
+  const active = timeline.find((event) => (
+    event.type === 'zoom' && event.enabled && currentMs >= event.startMs && currentMs <= event.endMs
+  ));
+  const selected = selection?.kind === 'zoom'
+    ? timeline.find((event) => event.id === selection.id && event.type === 'zoom')
+    : undefined;
+  const scale = Number((active ?? selected)?.payload.scale ?? 1);
+  return clamp(scale, 1, 2.5);
 }
 
 function readLatestSilenceSettings(jobs: VideoJob[]): SilenceDetectRequest {

@@ -108,7 +108,7 @@ while (true) {
       const state = await store.getEditorState(video.id);
       if (!state) throw new Error('Missing editor state');
       await store.updateJob(job.id, { progress: 20 });
-      const outputPath = await renderVideo(state, job.id);
+      const outputPath = await renderVideo(state, job.id, job.payload);
       await store.createRender({
         videoId: video.id,
         jobId: job.id,

@@ -28,25 +28,39 @@ interface OverlayEvent {
   endMs: number;
 }
 
-export async function renderVideo(state: EditorState, jobId: string) {
+interface OutputPreset {
+  aspectRatio: '9:16' | '4:5' | '1:1' | '16:9';
+  width: number;
+  height: number;
+}
+
+export async function renderVideo(state: EditorState, jobId: string, options: Record<string, unknown> = {}) {
   const renderDir = await ensureVideoDir('renders', state.video.id);
   const tmpBaseDir = await ensureVideoDir('tmp', state.video.id);
   const tmpDir = path.join(tmpBaseDir, jobId);
   await fs.mkdir(tmpDir, { recursive: true });
   const keeps = buildKeepSegments(state.video.durationMs, state.silences);
+  const outputPreset = outputPresetFor(options.aspectRatio);
   const cutPath = path.join(tmpDir, `${jobId}-cut.mp4`);
+  const framedPath = path.join(tmpDir, `${jobId}-framed.mp4`);
+  const zoomedPath = path.join(tmpDir, `${jobId}-zoomed.mp4`);
   const subtitlePath = path.join(tmpDir, `${jobId}.ass`);
   const subtitledPath = path.join(tmpDir, `${jobId}-subtitled.mp4`);
   const outputPath = path.join(renderDir, `render-${Date.now()}.mp4`);
 
   try {
     const cutInput = await renderCuts(state.video.originalPath, cutPath, tmpDir, jobId, keeps, state.video.durationMs);
-    await writeAssFile(subtitlePath, state.subtitles, keeps, state.video.width || 1080, state.video.height || 1920);
+    const framedInput = await conformToOutput(cutInput, framedPath, outputPreset);
+    const framedProbe = outputPreset ? { width: outputPreset.width, height: outputPreset.height } : await ffprobe(framedInput);
+    const subtitleWidth = framedProbe.width || state.video.width || 1080;
+    const subtitleHeight = framedProbe.height || state.video.height || 1920;
+    const zoomedInput = await renderZooms(framedInput, zoomedPath, state, keeps, subtitleWidth, subtitleHeight);
+    await writeAssFile(subtitlePath, state.subtitles, keeps, subtitleWidth, subtitleHeight);
 
     await runCommand(env.ffmpegPath, [
       '-y',
       '-i',
-      cutInput,
+      zoomedInput,
       '-vf',
       `ass='${escapeFilterPath(subtitlePath)}'`,
       '-c:v',
@@ -60,12 +74,34 @@ export async function renderVideo(state: EditorState, jobId: string) {
       subtitledPath
     ]);
 
-    const probe = await ffprobe(subtitledPath);
-    await renderEffects(subtitledPath, outputPath, state, keeps, probe.width, probe.height);
+    await renderOverlays(subtitledPath, outputPath, state, keeps);
     return outputPath;
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
+}
+
+async function conformToOutput(inputPath: string, outputPath: string, preset: OutputPreset | null) {
+  if (!preset) return inputPath;
+  await runCommand(env.ffmpegPath, [
+    '-y',
+    '-i',
+    inputPath,
+    '-vf',
+    `scale=${preset.width}:${preset.height}:force_original_aspect_ratio=increase,crop=${preset.width}:${preset.height},setsar=1`,
+    '-c:v',
+    'libx264',
+    '-preset',
+    'veryfast',
+    '-crf',
+    '18',
+    '-c:a',
+    'aac',
+    '-movflags',
+    '+faststart',
+    outputPath
+  ]);
+  return outputPath;
 }
 
 function buildKeepSegments(durationMs: number, silences: SilenceSegment[]) {
@@ -94,6 +130,14 @@ function buildKeepSegments(durationMs: number, silences: SilenceSegment[]) {
   }
   if (durationMs > cursor + 120) keeps.push({ startMs: cursor, endMs: durationMs });
   return keeps.length ? keeps : [{ startMs: 0, endMs: durationMs }];
+}
+
+function outputPresetFor(value: unknown): OutputPreset | null {
+  if (value === '9:16') return { aspectRatio: '9:16', width: 1080, height: 1920 };
+  if (value === '4:5') return { aspectRatio: '4:5', width: 1080, height: 1350 };
+  if (value === '1:1') return { aspectRatio: '1:1', width: 1080, height: 1080 };
+  if (value === '16:9') return { aspectRatio: '16:9', width: 1920, height: 1080 };
+  return null;
 }
 
 async function renderCuts(inputPath: string, outputPath: string, tmpDir: string, jobId: string, keeps: KeepSegment[], durationMs: number) {
@@ -192,14 +236,38 @@ function assStyleLine(name: string, style: SubtitleStyle, width: number, height:
   ].join(' ');
 }
 
-async function renderEffects(inputPath: string, outputPath: string, state: EditorState, keeps: KeepSegment[], width: number, height: number) {
-  const overlays = buildOverlayEvents(state.assets, state.transcript, state.timeline, keeps);
+async function renderZooms(inputPath: string, outputPath: string, state: EditorState, keeps: KeepSegment[], width: number, height: number) {
   const zooms = state.timeline
     .filter((event) => event.type === 'zoom' && event.enabled)
     .map((event) => remapTimelineEvent(event, keeps))
     .filter(Boolean) as TimelineEvent[];
 
-  if (!overlays.length && !zooms.length) {
+  if (!zooms.length || width <= 0 || height <= 0) return inputPath;
+
+  const scaleExpr = nestedBetweenExpr(zooms, 'scale', 1.16);
+  await runCommand(env.ffmpegPath, [
+    '-y',
+    '-i',
+    inputPath,
+    '-vf',
+    `scale=w='trunc(iw*(${scaleExpr})/2)*2':h='trunc(ih*(${scaleExpr})/2)*2':eval=frame,crop=${width}:${height}:(in_w-${width})/2:(in_h-${height})/2`,
+    '-c:v',
+    'libx264',
+    '-preset',
+    'medium',
+    '-crf',
+    '18',
+    '-c:a',
+    'aac',
+    outputPath
+  ]);
+  return outputPath;
+}
+
+async function renderOverlays(inputPath: string, outputPath: string, state: EditorState, keeps: KeepSegment[]) {
+  const overlays = buildOverlayEvents(state.assets, state.transcript, state.timeline, keeps);
+
+  if (!overlays.length) {
     await runCommand(env.ffmpegPath, ['-y', '-i', inputPath, '-c', 'copy', outputPath]);
     return;
   }
@@ -209,13 +277,6 @@ async function renderEffects(inputPath: string, outputPath: string, state: Edito
 
   const filters: string[] = [];
   let current = '[0:v]';
-  if (zooms.length && width > 0 && height > 0) {
-    const scaleExpr = nestedBetweenExpr(zooms, 'scale', 1.16);
-    filters.push(
-      `${current}scale=w='trunc(iw*(${scaleExpr})/2)*2':h='trunc(ih*(${scaleExpr})/2)*2':eval=frame,crop=${width}:${height}:(in_w-${width})/2:(in_h-${height})/2[vz]`
-    );
-    current = '[vz]';
-  }
 
   overlays.forEach((event, index) => {
     const inputIndex = index + 1;
