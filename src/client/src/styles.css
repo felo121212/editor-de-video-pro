@@ -690,50 +690,115 @@ input[type="range"] {
   gap: 8px;
   border-bottom: 1px solid var(--line);
   padding: 0 14px;
+  overflow-x: auto;
 }
 
 .timeline-tools button {
+  flex: 0 0 auto;
   padding: 7px 10px;
   font-size: 12px;
 }
 
-.timeline-tools span {
+.timeline-tools > span {
   margin-left: auto;
   color: var(--muted);
   font-size: 12px;
 }
 
+.timeline-zoom-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 270px;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.timeline-zoom-control input {
+  width: 118px;
+}
+
+.timeline-zoom-control button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+}
+
+.timeline-zoom-control strong {
+  min-width: 34px;
+  color: var(--text);
+  font-size: 12px;
+  text-align: right;
+}
+
 .time-ruler {
   position: relative;
-  display: grid;
-  gap: 2px;
   height: calc(100% - 45px);
-  padding: 34px 12px 12px 150px;
   cursor: crosshair;
   overflow: auto;
 }
 
-.time-ruler::before {
-  content: "00:00        00:10        00:20        00:30        00:40        00:50        01:00";
+.timeline-canvas {
+  position: relative;
+  min-width: 100%;
+  min-height: 100%;
+  padding: 34px 0 12px;
+}
+
+.timeline-ticks {
   position: absolute;
-  left: 150px;
+  top: 9px;
+  left: 0;
   right: 12px;
-  top: 10px;
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  height: 18px;
   color: var(--muted);
   font-size: 11px;
-  word-spacing: 34px;
+  pointer-events: none;
+}
+
+.timeline-ticks > span {
+  position: sticky;
+  left: 0;
+  z-index: 7;
+  background: #10131a;
+}
+
+.timeline-ticks > div {
+  position: relative;
+}
+
+.timeline-ticks i {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  font-style: normal;
   white-space: nowrap;
-  overflow: hidden;
+}
+
+.timeline-ticks i::before {
+  content: "";
+  position: absolute;
+  top: 17px;
+  left: 50%;
+  width: 1px;
+  height: 7px;
+  background: rgba(196, 181, 253, 0.26);
 }
 
 .playhead {
   position: absolute;
   top: 9px;
   bottom: 12px;
+  left: calc(150px + (100% - 162px) * var(--playhead));
   width: 2px;
   background: #b794ff;
   box-shadow: 0 0 18px rgba(183, 148, 255, 0.86);
-  z-index: 6;
+  z-index: 8;
 }
 
 .playhead b {
@@ -750,14 +815,22 @@ input[type="range"] {
 
 .lane {
   position: relative;
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
   min-height: 38px;
+  padding-right: 12px;
 }
 
 .lane > span {
-  position: absolute;
-  left: -138px;
-  top: 10px;
-  width: 118px;
+  position: sticky;
+  left: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  height: 38px;
+  padding-left: 12px;
+  background: #10131a;
+  color: var(--muted);
   font-size: 12px;
 }
 

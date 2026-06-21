@@ -40,6 +40,11 @@ type SelectionKind = 'silence' | 'subtitle' | 'asset' | 'zoom' | 'image_overlay'
 type SelectionTarget = { kind: SelectionKind; id: string } | null;
 type DragMode = 'move' | 'start' | 'end';
 type PipelineStepKey = 'ingest' | 'generate_waveform' | 'generate_thumbnails' | 'detect_silence' | 'transcribe';
+type EditorHistorySnapshot = {
+  silences: SilenceSegment[];
+  subtitles: SubtitleCue[];
+  timeline: TimelineEvent[];
+};
 type SilenceDetectRequest = {
   noiseDb: number;
   minDurationSec: number;
@@ -55,6 +60,9 @@ const defaultSilenceDetectRequest: SilenceDetectRequest = {
   paddingAfterMs: 120,
   preserveBreaths: true
 };
+
+const timelineLabelWidth = 150;
+const timelineRightPad = 12;
 
 const subtitlePresets: Record<SubtitleStyle['preset'], SubtitleStyle> = {
   bold: {
@@ -228,6 +236,9 @@ function App() {
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [aspect, setAspect] = useState<AspectRatio>('9:16');
   const [selection, setSelection] = useState<SelectionTarget>(null);
+  const [timelineScale, setTimelineScale] = useState(1.4);
+  const [undoStack, setUndoStack] = useState<EditorHistorySnapshot[]>([]);
+  const [redoStack, setRedoStack] = useState<EditorHistorySnapshot[]>([]);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const selectedVideoId = state?.video.id ?? videos[0]?.id;
 
@@ -253,6 +264,13 @@ function App() {
     }, 2200);
     return () => window.clearInterval(timer);
   }, [selectedVideoId]);
+
+  useEffect(() => {
+    setSelection(null);
+    setCurrentMs(0);
+    setUndoStack([]);
+    setRedoStack([]);
+  }, [state?.video.id]);
 
   const latestJob = state?.jobs[0];
   const latestRender = state?.renders[0];
@@ -283,8 +301,10 @@ function App() {
     try {
       await action();
       await refresh(state?.video.id);
+      return true;
     } catch (err) {
       setError(String(err instanceof Error ? err.message : err));
+      return false;
     } finally {
       setBusy('');
     }
@@ -315,9 +335,11 @@ function App() {
 
   async function saveSubtitles(items: SubtitleCue[]) {
     if (!state) return;
-    await runAction('Guardando subtitulos', async () => {
+    const before = snapshotEditorState(state);
+    const didSave = await runAction('Guardando subtitulos', async () => {
       await api.patch(`/api/videos/${state.video.id}/subtitles`, items);
     });
+    if (didSave) rememberSnapshot(before);
   }
 
   async function regenerateSubtitles(settings: SubtitleGenerationSettings) {
@@ -329,16 +351,20 @@ function App() {
 
   async function saveSilences(items: SilenceSegment[]) {
     if (!state) return;
-    await runAction('Guardando silencios', async () => {
+    const before = snapshotEditorState(state);
+    const didSave = await runAction('Guardando silencios', async () => {
       await api.patch(`/api/videos/${state.video.id}/silences`, items);
     });
+    if (didSave) rememberSnapshot(before);
   }
 
   async function saveTimeline(items: TimelineEvent[]) {
     if (!state) return;
-    await runAction('Guardando timeline', async () => {
+    const before = snapshotEditorState(state);
+    const didSave = await runAction('Guardando timeline', async () => {
       await api.patch(`/api/videos/${state.video.id}/timeline`, items);
     });
+    if (didSave) rememberSnapshot(before);
   }
 
   async function runPipelineStep(type: 'waveform' | 'thumbnails' | 'detect-silence' | 'transcribe') {
@@ -348,6 +374,168 @@ function App() {
       await api.enqueue(state.video.id, type, payload);
     });
   }
+
+  function rememberSnapshot(snapshot: EditorHistorySnapshot) {
+    setUndoStack((current) => {
+      const latest = current.at(-1);
+      if (latest && sameSnapshot(latest, snapshot)) return current;
+      return [...current.slice(-29), snapshot];
+    });
+    setRedoStack([]);
+  }
+
+  async function restoreSnapshot(label: string, snapshot: EditorHistorySnapshot) {
+    if (!state) return false;
+    return runAction(label, async () => {
+      await Promise.all([
+        api.patch(`/api/videos/${state.video.id}/silences`, snapshot.silences),
+        api.patch(`/api/videos/${state.video.id}/subtitles`, snapshot.subtitles),
+        api.patch(`/api/videos/${state.video.id}/timeline`, snapshot.timeline)
+      ]);
+    });
+  }
+
+  async function undoEdit() {
+    if (!state || !undoStack.length) return;
+    const snapshot = undoStack[undoStack.length - 1];
+    const current = snapshotEditorState(state);
+    setUndoStack((stack) => stack.slice(0, -1));
+    setRedoStack((stack) => [...stack.slice(-29), current]);
+    const didRestore = await restoreSnapshot('Deshaciendo edicion', snapshot);
+    if (!didRestore) {
+      setUndoStack((stack) => [...stack, snapshot]);
+      setRedoStack((stack) => stack.slice(0, -1));
+    }
+  }
+
+  async function redoEdit() {
+    if (!state || !redoStack.length) return;
+    const snapshot = redoStack[redoStack.length - 1];
+    const current = snapshotEditorState(state);
+    setRedoStack((stack) => stack.slice(0, -1));
+    setUndoStack((stack) => [...stack.slice(-29), current]);
+    const didRestore = await restoreSnapshot('Rehaciendo edicion', snapshot);
+    if (!didRestore) {
+      setRedoStack((stack) => [...stack, snapshot]);
+      setUndoStack((stack) => stack.slice(0, -1));
+    }
+  }
+
+  function deleteSelection() {
+    if (!state || !selection) return;
+    if (selection.kind === 'silence') {
+      void saveSilences(state.silences.filter((item) => item.id !== selection.id));
+      setSelection(null);
+      return;
+    }
+    if (selection.kind === 'subtitle') {
+      void saveSubtitles(state.subtitles.filter((item) => item.id !== selection.id));
+      setSelection(null);
+      return;
+    }
+    if (selection.kind === 'zoom' || selection.kind === 'image_overlay') {
+      void saveTimeline(state.timeline.filter((item) => item.id !== selection.id));
+      setSelection(null);
+    }
+  }
+
+  function splitSelectionAtPlayhead() {
+    if (!state || !selection) return;
+    if (selection.kind === 'silence') {
+      const target = state.silences.find((item) => item.id === selection.id);
+      const splitMs = target ? splitPointForRange(target.startMs, target.endMs, currentMs) : null;
+      if (!target || splitMs === null) return;
+      const secondId = clientId();
+      const next: SilenceSegment[] = state.silences.flatMap((item) => {
+        if (item.id !== target.id) return [item];
+        return [
+          { ...item, endMs: splitMs, durationMs: splitMs - item.startMs },
+          { ...item, id: secondId, startMs: splitMs, durationMs: item.endMs - splitMs }
+        ];
+      });
+      void saveSilences(next);
+      setSelection({ kind: 'silence', id: secondId });
+      seek(splitMs);
+      return;
+    }
+    if (selection.kind === 'subtitle') {
+      const target = state.subtitles.find((item) => item.id === selection.id);
+      const splitMs = target ? splitPointForRange(target.startMs, target.endMs, currentMs) : null;
+      if (!target || splitMs === null) return;
+      const secondId = clientId();
+      const [firstText, secondText] = splitSubtitleText(target.text, (splitMs - target.startMs) / Math.max(1, target.endMs - target.startMs));
+      const next: SubtitleCue[] = state.subtitles.flatMap((item) => {
+        if (item.id !== target.id) return [item];
+        return [
+          { ...item, text: firstText || item.text, endMs: splitMs },
+          { ...item, id: secondId, text: secondText || item.text, startMs: splitMs }
+        ];
+      });
+      void saveSubtitles(next);
+      setSelection({ kind: 'subtitle', id: secondId });
+      seek(splitMs);
+      return;
+    }
+    if (selection.kind === 'zoom' || selection.kind === 'image_overlay') {
+      const target = state.timeline.find((item) => item.id === selection.id);
+      const splitMs = target ? splitPointForRange(target.startMs, target.endMs, currentMs) : null;
+      if (!target || splitMs === null) return;
+      const secondId = clientId();
+      const next: TimelineEvent[] = state.timeline.flatMap((item) => {
+        if (item.id !== target.id) return [item];
+        return [
+          { ...item, endMs: splitMs },
+          { ...item, id: secondId, startMs: splitMs }
+        ];
+      });
+      void saveTimeline(next);
+      setSelection({ kind: selection.kind, id: secondId });
+      seek(splitMs);
+    }
+  }
+
+  function nudgeTimelineScale(delta: number) {
+    setTimelineScale((value) => clamp(value + delta, 1, 5));
+  }
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (isTypingTarget(event.target)) return;
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
+        event.preventDefault();
+        if (event.shiftKey) void redoEdit();
+        else void undoEdit();
+        return;
+      }
+      if (event.code === 'Space') {
+        event.preventDefault();
+        if (videoRef.current?.paused) void videoRef.current.play();
+        else videoRef.current?.pause();
+        return;
+      }
+      if (event.key.toLowerCase() === 's' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        event.preventDefault();
+        splitSelectionAtPlayhead();
+        return;
+      }
+      if (event.key === 'Delete' || event.key === 'Backspace') {
+        event.preventDefault();
+        deleteSelection();
+        return;
+      }
+      if (event.key === '+' || event.key === '=') {
+        event.preventDefault();
+        nudgeTimelineScale(0.25);
+        return;
+      }
+      if (event.key === '-' || event.key === '_') {
+        event.preventDefault();
+        nudgeTimelineScale(-0.25);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [state, selection, currentMs, undoStack, redoStack]);
 
   return (
     <main className="studio-shell">
@@ -410,8 +598,16 @@ function App() {
                 state={state}
                 currentMs={currentMs}
                 selection={selection}
+                timelineScale={timelineScale}
+                canUndo={undoStack.length > 0}
+                canRedo={redoStack.length > 0}
                 onSelect={selectTarget}
                 onSeek={seek}
+                onTimelineScale={setTimelineScale}
+                onUndo={undoEdit}
+                onRedo={redoEdit}
+                onSplit={splitSelectionAtPlayhead}
+                onDelete={deleteSelection}
                 onSaveSubtitles={saveSubtitles}
                 onSaveSilences={saveSilences}
                 onSaveTimeline={saveTimeline}
@@ -708,8 +904,16 @@ function Timeline({
   state,
   currentMs,
   selection,
+  timelineScale,
+  canUndo,
+  canRedo,
   onSelect,
   onSeek,
+  onTimelineScale,
+  onUndo,
+  onRedo,
+  onSplit,
+  onDelete,
   onSaveSubtitles,
   onSaveSilences,
   onSaveTimeline
@@ -717,8 +921,16 @@ function Timeline({
   state: ApiState;
   currentMs: number;
   selection: SelectionTarget;
+  timelineScale: number;
+  canUndo: boolean;
+  canRedo: boolean;
   onSelect: (target: SelectionTarget) => void;
   onSeek: (ms: number) => void;
+  onTimelineScale: (scale: number) => void;
+  onUndo: () => void;
+  onRedo: () => void;
+  onSplit: () => void;
+  onDelete: () => void;
   onSaveSubtitles: (items: SubtitleCue[]) => Promise<void>;
   onSaveSilences: (items: SilenceSegment[]) => Promise<void>;
   onSaveTimeline: (items: TimelineEvent[]) => Promise<void>;
@@ -728,6 +940,7 @@ function Timeline({
   const [draftEdits, setDraftEdits] = useState<Record<string, { startMs: number; endMs: number }>>({});
   const zooms = state.timeline.filter((event) => event.type === 'zoom');
   const imageEvents = state.timeline.filter((event) => event.type === 'image_overlay');
+  const clampedScale = clamp(timelineScale, 1, 5);
 
   function addZoom() {
     const startMs = Math.max(0, currentMs);
@@ -746,8 +959,9 @@ function Timeline({
   function timelineMs(event: React.MouseEvent<HTMLDivElement>) {
     const target = event.currentTarget;
     const rect = target.getBoundingClientRect();
-    const x = event.clientX - rect.left + target.scrollLeft;
-    return (x / target.scrollWidth) * duration;
+    const trackWidth = timelineTrackWidth(target);
+    const x = event.clientX - rect.left + target.scrollLeft - timelineLabelWidth;
+    return clamp((x / trackWidth) * duration, 0, duration);
   }
 
   function editKey(kind: SelectionKind | 'timeline', id: string) {
@@ -793,7 +1007,7 @@ function Timeline({
     let moved = false;
 
     const update = (clientX: number) => {
-      const deltaMs = ((clientX - startClientX) / Math.max(1, ruler.scrollWidth)) * duration;
+      const deltaMs = ((clientX - startClientX) / timelineTrackWidth(ruler)) * duration;
       moved = moved || Math.abs(deltaMs) > 18;
       latest = clampRange(applyDrag(original, deltaMs, mode), duration);
       setDraftEdits((current) => ({ ...current, [key]: latest }));
@@ -841,79 +1055,121 @@ function Timeline({
   return (
     <section className="timeline-panel">
       <div className="timeline-tools">
-        <button>Deshacer</button>
-        <button>Cortar</button>
-        <button>Dividir</button>
+        <button disabled={!canUndo} onClick={onUndo}>Deshacer</button>
+        <button disabled={!canRedo} onClick={onRedo}>Rehacer</button>
+        <button disabled={!selection} onClick={onDelete}>Borrar</button>
+        <button disabled={!selection} onClick={onSplit}>Dividir</button>
         <button onClick={addZoom}>Zoom en cursor</button>
-        <span>Zoom timeline</span>
+        <label className="timeline-zoom-control">
+          <span>Zoom timeline</span>
+          <button type="button" onClick={() => onTimelineScale(clamp(clampedScale - 0.25, 1, 5))}>-</button>
+          <input
+            type="range"
+            min="1"
+            max="5"
+            step="0.25"
+            value={clampedScale}
+            onChange={(event) => onTimelineScale(Number(event.target.value))}
+          />
+          <button type="button" onClick={() => onTimelineScale(clamp(clampedScale + 0.25, 1, 5))}>+</button>
+          <strong>{clampedScale.toFixed(1)}x</strong>
+        </label>
       </div>
       <div ref={rulerRef} className="time-ruler" onClick={(event) => onSeek(timelineMs(event))}>
-        <div className="playhead" style={{ left: `${(currentMs / duration) * 100}%` }}>
-          <b>{formatDuration(currentMs)}</b>
-        </div>
-        <Lane label="Video">
-          {state.thumbnails.length ? (
-            <div className="thumbnail-strip">
-              {state.thumbnails.map((thumbnail) => (
-                <img key={thumbnail.id} src={thumbnail.fileUrl ?? ''} alt="" />
-              ))}
-            </div>
-          ) : (
-            <div className="video-strip" />
-          )}
-        </Lane>
-        <Lane label="Audio">
-          {state.waveform.length ? <Waveform points={state.waveform} /> : <div className="waveform" />}
-        </Lane>
-        <Lane label="Silencios">
-          {state.silences.map((segment) => segmentButton({
-            kind: 'silence',
-            id: segment.id,
-            startMs: segment.startMs,
-            endMs: segment.endMs,
-            selection: { kind: 'silence', id: segment.id }
-          }, `silence ${segment.action}`, segment.action))}
-        </Lane>
-        <Lane label="Subtitulos">
-          {state.subtitles.map((cue) => segmentButton({
-            kind: 'subtitle',
-            id: cue.id,
-            startMs: cue.startMs,
-            endMs: cue.endMs,
-            selection: { kind: 'subtitle', id: cue.id }
-          }, 'subtitle', cue.text.slice(0, 24)))}
-        </Lane>
-        <Lane label="PNGs">
-          {imageEvents.map((event) => {
-            const asset = state.assets.find((item) => item.id === event.payload.assetId);
-            return segmentButton({
+        <div
+          className="timeline-canvas"
+          style={{
+            width: `${Math.round(clampedScale * 100)}%`,
+            '--playhead': String(clamp(currentMs / duration, 0, 1))
+          } as React.CSSProperties}
+        >
+          <TimeTicks durationMs={duration} />
+          <div className="playhead">
+            <b>{formatDuration(currentMs)}</b>
+          </div>
+          <Lane label="Video">
+            {state.thumbnails.length ? (
+              <div className="thumbnail-strip">
+                {state.thumbnails.map((thumbnail) => (
+                  <img key={thumbnail.id} src={thumbnail.fileUrl ?? ''} alt="" />
+                ))}
+              </div>
+            ) : (
+              <div className="video-strip" />
+            )}
+          </Lane>
+          <Lane label="Audio">
+            {state.waveform.length ? <Waveform points={state.waveform} /> : <div className="waveform" />}
+          </Lane>
+          <Lane label="Silencios">
+            {state.silences.map((segment) => segmentButton({
+              kind: 'silence',
+              id: segment.id,
+              startMs: segment.startMs,
+              endMs: segment.endMs,
+              selection: { kind: 'silence', id: segment.id }
+            }, `silence ${segment.action}`, segment.action))}
+          </Lane>
+          <Lane label="Subtitulos">
+            {state.subtitles.map((cue) => segmentButton({
+              kind: 'subtitle',
+              id: cue.id,
+              startMs: cue.startMs,
+              endMs: cue.endMs,
+              selection: { kind: 'subtitle', id: cue.id }
+            }, 'subtitle', cue.text.slice(0, 24)))}
+          </Lane>
+          <Lane label="PNGs">
+            {imageEvents.map((event) => {
+              const asset = state.assets.find((item) => item.id === event.payload.assetId);
+              return segmentButton({
+                kind: 'timeline',
+                id: event.id,
+                startMs: event.startMs,
+                endMs: event.endMs,
+                selection: { kind: 'image_overlay', id: event.id }
+              }, `asset-event-segment ${event.enabled ? '' : 'is-off'}`, asset?.label ?? 'Overlay');
+            })}
+            {state.assets.map((asset, index) => (
+              <button key={asset.id} className={`asset-event ${selection?.kind === 'asset' && selection.id === asset.id ? 'is-selected' : ''}`} style={{ left: `${Math.min(92, 8 + index * 11)}%` }} onClick={(event) => {
+                event.stopPropagation();
+                onSelect({ kind: 'asset', id: asset.id });
+              }}>
+                {asset.triggerWords[0] ?? asset.label}
+              </button>
+            ))}
+          </Lane>
+          <Lane label="Zooms">
+            {zooms.map((event) => segmentButton({
               kind: 'timeline',
               id: event.id,
               startMs: event.startMs,
               endMs: event.endMs,
-              selection: { kind: 'image_overlay', id: event.id }
-            }, `asset-event-segment ${event.enabled ? '' : 'is-off'}`, asset?.label ?? 'Overlay');
-          })}
-          {state.assets.map((asset, index) => (
-            <button key={asset.id} className={`asset-event ${selection?.kind === 'asset' && selection.id === asset.id ? 'is-selected' : ''}`} style={{ left: `${Math.min(92, 8 + index * 11)}%` }} onClick={(event) => {
-              event.stopPropagation();
-              onSelect({ kind: 'asset', id: asset.id });
-            }}>
-              {asset.triggerWords[0] ?? asset.label}
-            </button>
-          ))}
-        </Lane>
-        <Lane label="Zooms">
-          {zooms.map((event) => segmentButton({
-            kind: 'timeline',
-            id: event.id,
-            startMs: event.startMs,
-            endMs: event.endMs,
-            selection: { kind: 'zoom', id: event.id }
-          }, `zoom ${event.enabled ? '' : 'is-off'}`, `${Number(event.payload.scale ?? 1.18).toFixed(2)}x`))}
-        </Lane>
+              selection: { kind: 'zoom', id: event.id }
+            }, `zoom ${event.enabled ? '' : 'is-off'}`, `${Number(event.payload.scale ?? 1.18).toFixed(2)}x`))}
+          </Lane>
+        </div>
       </div>
     </section>
+  );
+}
+
+function TimeTicks({ durationMs }: { durationMs: number }) {
+  const interval = timelineTickInterval(durationMs);
+  const ticks: number[] = [];
+  for (let ms = 0; ms < durationMs; ms += interval) ticks.push(ms);
+  if (!ticks.length || ticks[ticks.length - 1] !== durationMs) ticks.push(durationMs);
+  return (
+    <div className="timeline-ticks">
+      <span />
+      <div>
+        {ticks.map((tick) => (
+          <i key={tick} style={{ left: `${(tick / Math.max(1, durationMs)) * 100}%` }}>
+            {formatDuration(tick)}
+          </i>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -1542,6 +1798,46 @@ function applyDrag(range: { startMs: number; endMs: number }, deltaMs: number, m
   return { startMs: range.startMs + deltaMs, endMs: range.endMs + deltaMs };
 }
 
+function snapshotEditorState(state: ApiState): EditorHistorySnapshot {
+  return {
+    silences: state.silences.map((item) => ({ ...item })),
+    subtitles: state.subtitles.map((item) => ({ ...item, style: { ...item.style } })),
+    timeline: state.timeline.map((item) => ({ ...item, payload: { ...item.payload } }))
+  };
+}
+
+function sameSnapshot(first: EditorHistorySnapshot, second: EditorHistorySnapshot) {
+  return JSON.stringify(first) === JSON.stringify(second);
+}
+
+function timelineTrackWidth(ruler: HTMLElement) {
+  return Math.max(1, ruler.scrollWidth - timelineLabelWidth - timelineRightPad);
+}
+
+function timelineTickInterval(durationMs: number) {
+  const options = [1000, 2000, 5000, 10000, 15000, 30000, 60000, 120000, 300000];
+  const target = Math.max(1, durationMs / 8);
+  return options.find((value) => value >= target) ?? options[options.length - 1];
+}
+
+function canSplitRange(startMs: number, endMs: number, splitMs: number) {
+  return splitMs - startMs >= 160 && endMs - splitMs >= 160;
+}
+
+function splitPointForRange(startMs: number, endMs: number, preferredMs: number) {
+  const preferred = Math.round(preferredMs);
+  if (canSplitRange(startMs, endMs, preferred)) return preferred;
+  const middle = Math.round(startMs + ((endMs - startMs) / 2));
+  return canSplitRange(startMs, endMs, middle) ? middle : null;
+}
+
+function splitSubtitleText(text: string, ratio: number) {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  if (words.length <= 1) return [text, text];
+  const splitIndex = Math.max(1, Math.min(words.length - 1, Math.round(words.length * clamp(ratio, 0.15, 0.85))));
+  return [words.slice(0, splitIndex).join(' '), words.slice(splitIndex).join(' ')];
+}
+
 function clampRange(range: { startMs: number; endMs: number }, durationMs: number) {
   const minDuration = Math.min(180, Math.max(40, durationMs / 30));
   let startMs = Math.max(0, Math.min(durationMs - minDuration, Math.round(range.startMs)));
@@ -1552,6 +1848,17 @@ function clampRange(range: { startMs: number; endMs: number }, durationMs: numbe
     endMs = durationMs;
   }
   return { startMs, endMs };
+}
+
+function clamp(value: number, min: number, max: number) {
+  if (!Number.isFinite(value)) return min;
+  return Math.max(min, Math.min(max, value));
+}
+
+function isTypingTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName.toLowerCase();
+  return tag === 'input' || tag === 'textarea' || tag === 'select' || target.isContentEditable;
 }
 
 function formatDuration(ms: number) {
