@@ -36,6 +36,7 @@ type AspectRatio = '9:16' | '1:1' | '16:9';
 type SelectionKind = 'silence' | 'subtitle' | 'asset' | 'zoom' | 'image_overlay';
 type SelectionTarget = { kind: SelectionKind; id: string } | null;
 type DragMode = 'move' | 'start' | 'end';
+type PipelineStepKey = 'ingest' | 'generate_waveform' | 'generate_thumbnails' | 'detect_silence' | 'transcribe';
 
 const selectionTabs: Record<SelectionKind, InspectorTab> = {
   silence: 'silences',
@@ -84,7 +85,7 @@ const api = {
       request.send(body);
     });
   },
-  async enqueue(videoId: string, type: 'detect-silence' | 'transcribe' | 'render', payload: Record<string, unknown> = {}) {
+  async enqueue(videoId: string, type: 'waveform' | 'thumbnails' | 'detect-silence' | 'transcribe' | 'render', payload: Record<string, unknown> = {}) {
     const response = await fetch(`/api/videos/${videoId}/jobs/${type}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -247,6 +248,14 @@ function App() {
     });
   }
 
+  async function runPipelineStep(type: 'waveform' | 'thumbnails' | 'detect-silence' | 'transcribe') {
+    if (!state) return;
+    await runAction(`Regenerando ${type}`, async () => {
+      const payload = type === 'detect-silence' ? { noiseDb: -35, minDurationSec: 0.35, source: 'manual_retry' } : { source: 'manual_retry' };
+      await api.enqueue(state.video.id, type, payload);
+    });
+  }
+
   return (
     <main className="studio-shell">
       <TopBar
@@ -279,6 +288,13 @@ function App() {
         <section className="editor-main">
           {(error || busy || latestJob) && (
             <StatusStrip error={error} busy={busy} job={latestJob} uploadProgress={uploadProgress} />
+          )}
+          {state && (
+            <PipelinePanel
+              state={state}
+              uploadProgress={uploadProgress}
+              onRunStep={runPipelineStep}
+            />
           )}
           {!state ? (
             <EmptyState onUpload={handleUpload} />
@@ -480,6 +496,36 @@ function StatusStrip({ error, busy, job, uploadProgress }: { error: string; busy
       <span>{text}</span>
       <strong>{Math.round(progress)}%</strong>
       <div><i style={{ width: `${Math.max(2, Math.min(100, progress))}%` }} /></div>
+    </div>
+  );
+}
+
+function PipelinePanel({
+  state,
+  uploadProgress,
+  onRunStep
+}: {
+  state: ApiState;
+  uploadProgress: number | null;
+  onRunStep: (type: 'waveform' | 'thumbnails' | 'detect-silence' | 'transcribe') => void;
+}) {
+  const jobsByType = new Map<string, VideoJob>();
+  for (const job of state.jobs) {
+    if (!jobsByType.has(job.type)) jobsByType.set(job.type, job);
+  }
+  const steps = pipelineSteps(state, jobsByType, uploadProgress);
+  return (
+    <div className="pipeline-panel">
+      {steps.map((step) => (
+        <div key={step.key} className={`pipeline-step ${step.status}`}>
+          <i />
+          <span>{step.label}</span>
+          <strong>{step.detail}</strong>
+          {step.action && (step.status === 'failed' || step.status === 'idle') && (
+            <button onClick={() => onRunStep(step.action!)}>{step.status === 'failed' ? 'Reintentar' : 'Regenerar'}</button>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
@@ -1336,6 +1382,46 @@ function tabLabel(tab: InspectorTab) {
 
 function parseWords(value: string) {
   return value.split(',').map((word) => word.trim()).filter(Boolean);
+}
+
+function pipelineSteps(state: ApiState, jobsByType: Map<string, VideoJob>, uploadProgress: number | null) {
+  const step = (
+    key: PipelineStepKey,
+    label: string,
+    done: boolean,
+    detailDone: string,
+    action?: 'waveform' | 'thumbnails' | 'detect-silence' | 'transcribe'
+  ) => {
+    const job = jobsByType.get(key);
+    const status = uploadProgress !== null && key === 'ingest'
+      ? 'running'
+      : job?.status === 'failed'
+        ? 'failed'
+        : done
+          ? 'done'
+          : job?.status === 'running'
+            ? 'running'
+            : job?.status === 'queued'
+              ? 'queued'
+              : 'idle';
+    const detail = status === 'done'
+      ? detailDone
+      : status === 'running'
+        ? `${jobLabel(key)} ${job?.progress ?? uploadProgress ?? 0}%`
+        : status === 'failed'
+          ? 'fallo, podes reintentar'
+          : status === 'queued'
+            ? 'en cola'
+            : 'pendiente';
+    return { key, label, status, detail, action: key === 'ingest' ? undefined : action };
+  };
+  return [
+    step('ingest', 'Preview', Boolean(state.video.proxyUrl || state.video.durationMs), state.video.proxyUrl ? 'proxy listo' : 'metadata lista'),
+    step('generate_waveform', 'Audio', state.waveform.length > 0, `${state.waveform.length} pts`, 'waveform'),
+    step('generate_thumbnails', 'Frames', state.thumbnails.length > 0, `${state.thumbnails.length} frames`, 'thumbnails'),
+    step('detect_silence', 'Cortes', state.silences.length > 0 || Boolean(jobsByType.get('detect_silence')?.status === 'done'), `${state.silences.length} cortes`, 'detect-silence'),
+    step('transcribe', 'Subs', state.transcript.length > 0 || state.subtitles.length > 0, `${state.subtitles.length} subs`, 'transcribe')
+  ];
 }
 
 function clientId() {

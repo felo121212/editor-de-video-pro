@@ -420,7 +420,7 @@ input[type="range"] {
 
 .editor-main {
   display: grid;
-  grid-template-rows: auto minmax(310px, 1fr) 336px;
+  grid-template-rows: auto auto minmax(310px, 1fr) 336px;
   min-width: 0;
   min-height: 0;
   background: #0a0d13;
@@ -436,6 +436,85 @@ input[type="range"] {
 }
 
 .status-strip.has-error i {
+  background: var(--red);
+}
+
+.pipeline-panel {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 8px;
+  min-height: 64px;
+  border-bottom: 1px solid var(--line);
+  padding: 10px 12px;
+  background: #0f1219;
+  overflow: hidden;
+}
+
+.pipeline-step {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: auto auto;
+  gap: 3px 7px;
+  align-items: center;
+  min-width: 0;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.035);
+  padding: 8px;
+}
+
+.pipeline-step i {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--muted);
+}
+
+.pipeline-step span,
+.pipeline-step strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pipeline-step span {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.pipeline-step strong {
+  grid-column: 2;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.pipeline-step button {
+  grid-column: 2 / -1;
+  padding: 5px 7px;
+  font-size: 11px;
+}
+
+.pipeline-step.done i {
+  background: var(--green);
+  box-shadow: 0 0 14px rgba(22, 217, 155, 0.45);
+}
+
+.pipeline-step.running i,
+.pipeline-step.queued i {
+  background: var(--accent-2);
+  box-shadow: 0 0 14px rgba(179, 92, 255, 0.45);
+}
+
+.pipeline-step.failed {
+  border-color: rgba(229, 72, 77, 0.42);
+}
+
+.pipeline-step.failed i {
   background: var(--red);
 }
 
@@ -1153,7 +1232,12 @@ select {
   }
 
   .editor-main {
-    grid-template-rows: auto minmax(360px, 1fr) 330px;
+    grid-template-rows: auto auto minmax(360px, 1fr) 330px;
+  }
+
+  .pipeline-panel {
+    grid-template-columns: repeat(5, minmax(132px, 1fr));
+    overflow-x: auto;
   }
 
   .top-actions,

@@ -35,7 +35,9 @@ while (true) {
       await store.updateVideo(video.id, { ...probe, proxyPath, status: 'ready' });
       await store.createJob(video.id, 'generate_waveform');
       await store.createJob(video.id, 'generate_thumbnails');
-      await store.updateJob(job.id, { status: 'done', progress: 100, result: { probe, proxyPath, nextJobs: ['generate_waveform', 'generate_thumbnails'] } });
+      await store.createJob(video.id, 'detect_silence', { source: 'auto_pipeline' });
+      await store.createJob(video.id, 'transcribe', { source: 'auto_pipeline' });
+      await store.updateJob(job.id, { status: 'done', progress: 100, result: { probe, proxyPath, nextJobs: ['generate_waveform', 'generate_thumbnails', 'detect_silence', 'transcribe'] } });
       continue;
     }
 
