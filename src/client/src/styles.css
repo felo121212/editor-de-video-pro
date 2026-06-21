@@ -552,7 +552,12 @@ input[type="range"] {
   max-width: 220px;
   max-height: 160px;
   filter: drop-shadow(0 14px 26px rgba(0, 0, 0, 0.52));
-  pointer-events: none;
+  cursor: grab;
+}
+
+.asset-preview.is-selected {
+  outline: 2px solid var(--green);
+  outline-offset: 5px;
 }
 
 .transport {
@@ -693,6 +698,38 @@ input[type="range"] {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 11px;
+  user-select: none;
+  touch-action: none;
+}
+
+.segment.is-selected {
+  border-color: #f6f3ff;
+  box-shadow: 0 0 0 1px rgba(246, 243, 255, 0.45), 0 0 24px rgba(139, 92, 246, 0.36);
+}
+
+.segment > i {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  width: 7px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.5);
+  opacity: 0;
+}
+
+.segment:hover > i,
+.segment.is-selected > i {
+  opacity: 1;
+}
+
+.segment > i:first-child {
+  left: 3px;
+  cursor: ew-resize;
+}
+
+.segment > i:last-child {
+  right: 3px;
+  cursor: ew-resize;
 }
 
 .silence.cut {
@@ -728,6 +765,17 @@ input[type="range"] {
   border: 1px solid rgba(96, 165, 250, 0.58);
   background: rgba(37, 99, 235, 0.22);
   font-size: 11px;
+}
+
+.asset-event.is-selected,
+.asset-event-segment.is-selected {
+  border-color: #f6f3ff;
+  box-shadow: 0 0 0 1px rgba(246, 243, 255, 0.45), 0 0 24px rgba(37, 99, 235, 0.32);
+}
+
+.asset-event-segment {
+  background: rgba(37, 99, 235, 0.28);
+  border-color: rgba(96, 165, 250, 0.58);
 }
 
 .inspector {
@@ -801,6 +849,71 @@ input[type="range"] {
   min-height: 0;
   overflow: auto;
   padding: 12px;
+}
+
+.selection-card {
+  display: grid;
+  gap: 12px;
+  margin: 12px 12px 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(139, 92, 246, 0.13), rgba(255, 255, 255, 0.03)),
+    #121720;
+  padding: 12px;
+}
+
+.selection-card textarea {
+  min-height: 74px;
+}
+
+.selection-thumb {
+  width: 72px;
+  height: 72px;
+  object-fit: contain;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: #05060a;
+}
+
+.time-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.time-fields label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.selection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.selection-actions button {
+  flex: 1 1 auto;
+  min-width: 82px;
+  padding: 8px 9px;
+  font-size: 12px;
+}
+
+.position-fields {
+  display: grid;
+  gap: 8px;
+}
+
+select {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #0d1017;
+  color: var(--text);
+  padding: 9px 10px;
 }
 
 .panel-head {

@@ -29,6 +29,17 @@ type ApiState = Omit<EditorState, 'video' | 'assets' | 'renders'> & {
 
 type InspectorTab = 'transcript' | 'subtitles' | 'silences' | 'assets' | 'zooms';
 type AspectRatio = '9:16' | '1:1' | '16:9';
+type SelectionKind = 'silence' | 'subtitle' | 'asset' | 'zoom' | 'image_overlay';
+type SelectionTarget = { kind: SelectionKind; id: string } | null;
+type DragMode = 'move' | 'start' | 'end';
+
+const selectionTabs: Record<SelectionKind, InspectorTab> = {
+  silence: 'silences',
+  subtitle: 'subtitles',
+  asset: 'assets',
+  zoom: 'zooms',
+  image_overlay: 'assets'
+};
 
 const api = {
   async getVideos(): Promise<ApiVideo[]> {
@@ -109,6 +120,10 @@ const api = {
     });
     if (!response.ok) throw new Error((await response.json()).error ?? 'Asset save failed');
     return response.json();
+  },
+  async deleteAsset(assetId: string) {
+    const response = await fetch(`/api/assets/${assetId}`, { method: 'DELETE' });
+    if (!response.ok) throw new Error((await response.json()).error ?? 'Asset delete failed');
   }
 };
 
@@ -121,6 +136,7 @@ function App() {
   const [currentMs, setCurrentMs] = useState(0);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [aspect, setAspect] = useState<AspectRatio>('9:16');
+  const [selection, setSelection] = useState<SelectionTarget>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const selectedVideoId = state?.video.id ?? videos[0]?.id;
 
@@ -158,10 +174,17 @@ function App() {
   const activeAssets = useMemo(() => {
     if (!state) return [];
     const segment = state.transcript.find((item) => currentMs >= item.startMs && currentMs <= item.endMs);
-    if (!segment) return [];
-    const lower = segment.text.toLowerCase();
-    return state.assets.filter((asset) => asset.triggerWords.some((word) => lower.includes(word.toLowerCase())));
-  }, [state, currentMs]);
+    const lower = segment?.text.toLowerCase() ?? '';
+    const triggered = lower ? state.assets.filter((asset) => asset.triggerWords.some((word) => lower.includes(word.toLowerCase()))) : [];
+    const selectedAsset = selection?.kind === 'asset' ? state.assets.find((asset) => asset.id === selection.id) : null;
+    if (!selectedAsset || triggered.some((asset) => asset.id === selectedAsset.id)) return triggered;
+    return [selectedAsset, ...triggered];
+  }, [state, currentMs, selection]);
+
+  function selectTarget(target: SelectionTarget) {
+    setSelection(target);
+    if (target) setActiveTab(selectionTabs[target.kind]);
+  }
 
   async function runAction(label: string, action: () => Promise<void>) {
     setBusy(label);
@@ -265,13 +288,18 @@ function App() {
                 aspect={aspect}
                 activeSubtitle={activeSubtitle}
                 activeAssets={activeAssets}
+                selection={selection}
+                onSelect={selectTarget}
                 onSeek={seek}
                 onTimeUpdate={setCurrentMs}
               />
               <Timeline
                 state={state}
                 currentMs={currentMs}
+                selection={selection}
+                onSelect={selectTarget}
                 onSeek={seek}
+                onSaveSubtitles={saveSubtitles}
                 onSaveSilences={saveSilences}
                 onSaveTimeline={saveTimeline}
               />
@@ -286,6 +314,8 @@ function App() {
           latestRender={latestRender}
           enabledCuts={enabledCuts}
           currentMs={currentMs}
+          selection={selection}
+          onSelect={selectTarget}
           busy={busy}
           onSeek={seek}
           onSaveTranscript={saveTranscript}
@@ -294,6 +324,7 @@ function App() {
           onSaveTimeline={saveTimeline}
           onUploadAsset={api.uploadAsset}
           onSaveAsset={api.patchAsset}
+          onDeleteAsset={api.deleteAsset}
           onRefresh={() => state ? refresh(state.video.id) : Promise.resolve()}
           onDetectSilence={(noiseDb, minDurationSec) => state && runAction('Detectando silencios', async () => {
             await api.enqueue(state.video.id, 'detect-silence', { noiseDb, minDurationSec });
@@ -457,6 +488,8 @@ function PreviewPanel({
   aspect,
   activeSubtitle,
   activeAssets,
+  selection,
+  onSelect,
   onSeek,
   onTimeUpdate
 }: {
@@ -467,6 +500,8 @@ function PreviewPanel({
   aspect: AspectRatio;
   activeSubtitle: SubtitleCue | null;
   activeAssets: ApiAsset[];
+  selection: SelectionTarget;
+  onSelect: (target: SelectionTarget) => void;
   onSeek: (ms: number) => void;
   onTimeUpdate: (ms: number) => void;
 }) {
@@ -493,8 +528,9 @@ function PreviewPanel({
           {activeAssets.map((asset) => (
             <img
               key={asset.id}
-              className="asset-preview"
+              className={`asset-preview ${selection?.kind === 'asset' && selection.id === asset.id ? 'is-selected' : ''}`}
               src={asset.fileUrl ?? ''}
+              onClick={() => onSelect({ kind: 'asset', id: asset.id })}
               style={{
                 left: `${asset.position.x * 100}%`,
                 top: `${asset.position.y * 100}%`,
@@ -520,18 +556,27 @@ function PreviewPanel({
 function Timeline({
   state,
   currentMs,
+  selection,
+  onSelect,
   onSeek,
+  onSaveSubtitles,
   onSaveSilences,
   onSaveTimeline
 }: {
   state: ApiState;
   currentMs: number;
+  selection: SelectionTarget;
+  onSelect: (target: SelectionTarget) => void;
   onSeek: (ms: number) => void;
+  onSaveSubtitles: (items: SubtitleCue[]) => Promise<void>;
   onSaveSilences: (items: SilenceSegment[]) => Promise<void>;
   onSaveTimeline: (items: TimelineEvent[]) => Promise<void>;
 }) {
   const duration = Math.max(state.video.durationMs, 1);
+  const rulerRef = useRef<HTMLDivElement | null>(null);
+  const [draftEdits, setDraftEdits] = useState<Record<string, { startMs: number; endMs: number }>>({});
   const zooms = state.timeline.filter((event) => event.type === 'zoom');
+  const imageEvents = state.timeline.filter((event) => event.type === 'image_overlay');
 
   function addZoom() {
     const startMs = Math.max(0, currentMs);
@@ -547,6 +592,101 @@ function Timeline({
     onSaveTimeline([...state.timeline, event]);
   }
 
+  function timelineMs(event: React.MouseEvent<HTMLDivElement>) {
+    const target = event.currentTarget;
+    const rect = target.getBoundingClientRect();
+    const x = event.clientX - rect.left + target.scrollLeft;
+    return (x / target.scrollWidth) * duration;
+  }
+
+  function editKey(kind: SelectionKind | 'timeline', id: string) {
+    return `${kind}:${id}`;
+  }
+
+  function rangeFor(kind: SelectionKind | 'timeline', id: string, startMs: number, endMs: number) {
+    return draftEdits[editKey(kind, id)] ?? { startMs, endMs };
+  }
+
+  function commitRange(target: { kind: SelectionKind | 'timeline'; id: string }, next: { startMs: number; endMs: number }) {
+    if (target.kind === 'silence') {
+      void onSaveSilences(state.silences.map((item) => item.id === target.id ? {
+        ...item,
+        startMs: next.startMs,
+        endMs: next.endMs,
+        durationMs: next.endMs - next.startMs
+      } : item));
+      return;
+    }
+    if (target.kind === 'subtitle') {
+      void onSaveSubtitles(state.subtitles.map((item) => item.id === target.id ? { ...item, startMs: next.startMs, endMs: next.endMs } : item));
+      return;
+    }
+    void onSaveTimeline(state.timeline.map((event) => event.id === target.id ? { ...event, startMs: next.startMs, endMs: next.endMs } : event));
+  }
+
+  function startDrag(
+    event: React.PointerEvent<HTMLElement>,
+    target: { kind: SelectionKind | 'timeline'; id: string; startMs: number; endMs: number; selection: SelectionTarget },
+    mode: DragMode
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    onSelect(target.selection);
+    onSeek(target.startMs);
+    if (event.button !== 0 || !rulerRef.current) return;
+    const ruler = rulerRef.current;
+    const startClientX = event.clientX;
+    const original = { startMs: target.startMs, endMs: target.endMs };
+    const key = editKey(target.kind, target.id);
+    let latest = original;
+    let moved = false;
+
+    const update = (clientX: number) => {
+      const deltaMs = ((clientX - startClientX) / Math.max(1, ruler.scrollWidth)) * duration;
+      moved = moved || Math.abs(deltaMs) > 18;
+      latest = clampRange(applyDrag(original, deltaMs, mode), duration);
+      setDraftEdits((current) => ({ ...current, [key]: latest }));
+    };
+
+    const handleMove = (moveEvent: PointerEvent) => update(moveEvent.clientX);
+    const handleUp = () => {
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+      setDraftEdits((current) => {
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+      if (moved) commitRange(target, latest);
+    };
+
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp, { once: true });
+  }
+
+  function segmentButton(
+    target: { kind: SelectionKind | 'timeline'; id: string; startMs: number; endMs: number; selection: SelectionTarget },
+    className: string,
+    label?: string
+  ) {
+    const range = rangeFor(target.kind, target.id, target.startMs, target.endMs);
+    const isSelected = selection?.id === target.selection?.id && selection?.kind === target.selection?.kind;
+    return (
+      <button
+        key={`${target.kind}-${target.id}`}
+        type="button"
+        className={`segment ${className} ${isSelected ? 'is-selected' : ''}`}
+        style={segmentStyle(range.startMs, range.endMs, duration)}
+        onPointerDown={(event) => startDrag(event, { ...target, startMs: range.startMs, endMs: range.endMs }, 'move')}
+        title={`${formatDuration(range.startMs)} - ${formatDuration(range.endMs)}`}
+      >
+        <i onPointerDown={(event) => startDrag(event, { ...target, startMs: range.startMs, endMs: range.endMs }, 'start')} />
+        {label}
+        <i onPointerDown={(event) => startDrag(event, { ...target, startMs: range.startMs, endMs: range.endMs }, 'end')} />
+      </button>
+    );
+  }
+
   return (
     <section className="timeline-panel">
       <div className="timeline-tools">
@@ -556,10 +696,7 @@ function Timeline({
         <button onClick={addZoom}>Zoom en cursor</button>
         <span>Zoom timeline</span>
       </div>
-      <div className="time-ruler" onClick={(event) => {
-        const rect = event.currentTarget.getBoundingClientRect();
-        onSeek(((event.clientX - rect.left) / rect.width) * duration);
-      }}>
+      <div ref={rulerRef} className="time-ruler" onClick={(event) => onSeek(timelineMs(event))}>
         <div className="playhead" style={{ left: `${(currentMs / duration) * 100}%` }}>
           <b>{formatDuration(currentMs)}</b>
         </div>
@@ -570,40 +707,51 @@ function Timeline({
           <div className="waveform" />
         </Lane>
         <Lane label="Silencios">
-          {state.silences.map((segment) => (
-            <button
-              key={segment.id}
-              className={`segment silence ${segment.action}`}
-              style={segmentStyle(segment.startMs, segment.endMs, duration)}
-              onClick={(event) => {
-                event.stopPropagation();
-                onSaveSilences(state.silences.map((item) => item.id === segment.id ? { ...item, action: item.action === 'cut' ? 'keep' : 'cut' } : item));
-              }}
-              title={`${formatDuration(segment.durationMs)} - ${segment.action}`}
-            />
-          ))}
+          {state.silences.map((segment) => segmentButton({
+            kind: 'silence',
+            id: segment.id,
+            startMs: segment.startMs,
+            endMs: segment.endMs,
+            selection: { kind: 'silence', id: segment.id }
+          }, `silence ${segment.action}`, segment.action))}
         </Lane>
         <Lane label="Subtitulos">
-          {state.subtitles.map((cue) => (
-            <button key={cue.id} className="segment subtitle" style={segmentStyle(cue.startMs, cue.endMs, duration)} onClick={(event) => {
+          {state.subtitles.map((cue) => segmentButton({
+            kind: 'subtitle',
+            id: cue.id,
+            startMs: cue.startMs,
+            endMs: cue.endMs,
+            selection: { kind: 'subtitle', id: cue.id }
+          }, 'subtitle', cue.text.slice(0, 24)))}
+        </Lane>
+        <Lane label="PNGs">
+          {imageEvents.map((event) => {
+            const asset = state.assets.find((item) => item.id === event.payload.assetId);
+            return segmentButton({
+              kind: 'timeline',
+              id: event.id,
+              startMs: event.startMs,
+              endMs: event.endMs,
+              selection: { kind: 'image_overlay', id: event.id }
+            }, `asset-event-segment ${event.enabled ? '' : 'is-off'}`, asset?.label ?? 'Overlay');
+          })}
+          {state.assets.map((asset, index) => (
+            <button key={asset.id} className={`asset-event ${selection?.kind === 'asset' && selection.id === asset.id ? 'is-selected' : ''}`} style={{ left: `${Math.min(92, 8 + index * 11)}%` }} onClick={(event) => {
               event.stopPropagation();
-              onSeek(cue.startMs);
+              onSelect({ kind: 'asset', id: asset.id });
             }}>
-              {cue.text.slice(0, 24)}
+              {asset.triggerWords[0] ?? asset.label}
             </button>
           ))}
         </Lane>
-        <Lane label="PNGs">
-          {state.assets.map((asset, index) => (
-            <span key={asset.id} className="asset-event" style={{ left: `${Math.min(92, 8 + index * 11)}%` }}>
-              {asset.triggerWords[0] ?? asset.label}
-            </span>
-          ))}
-        </Lane>
         <Lane label="Zooms">
-          {zooms.map((event) => (
-            <span key={event.id} className={`segment zoom ${event.enabled ? '' : 'is-off'}`} style={segmentStyle(event.startMs, event.endMs, duration)} />
-          ))}
+          {zooms.map((event) => segmentButton({
+            kind: 'timeline',
+            id: event.id,
+            startMs: event.startMs,
+            endMs: event.endMs,
+            selection: { kind: 'zoom', id: event.id }
+          }, `zoom ${event.enabled ? '' : 'is-off'}`, `${Number(event.payload.scale ?? 1.18).toFixed(2)}x`))}
         </Lane>
       </div>
     </section>
@@ -626,6 +774,8 @@ function Inspector({
   latestRender,
   enabledCuts,
   currentMs,
+  selection,
+  onSelect,
   busy,
   onSeek,
   onSaveTranscript,
@@ -634,6 +784,7 @@ function Inspector({
   onSaveTimeline,
   onUploadAsset,
   onSaveAsset,
+  onDeleteAsset,
   onRefresh,
   onDetectSilence
 }: {
@@ -643,6 +794,8 @@ function Inspector({
   latestRender?: ApiRender;
   enabledCuts: number;
   currentMs: number;
+  selection: SelectionTarget;
+  onSelect: (target: SelectionTarget) => void;
   busy: string;
   onSeek: (ms: number) => void;
   onSaveTranscript: (items: TranscriptSegment[]) => Promise<void>;
@@ -651,6 +804,7 @@ function Inspector({
   onSaveTimeline: (items: TimelineEvent[]) => Promise<void>;
   onUploadAsset: (videoId: string, file: File, label: string, triggerWords: string) => Promise<unknown>;
   onSaveAsset: (asset: ApiAsset) => Promise<unknown>;
+  onDeleteAsset: (assetId: string) => Promise<void>;
   onRefresh: () => Promise<void>;
   onDetectSilence: (noiseDb: number, minDurationSec: number) => void;
 }) {
@@ -672,6 +826,21 @@ function Inspector({
         <div className="empty-inspector">Selecciona o subi un proyecto.</div>
       ) : (
         <>
+          {selection && (
+            <SelectionInspector
+              state={state}
+              selection={selection}
+              currentMs={currentMs}
+              onSelect={onSelect}
+              onSeek={onSeek}
+              onSaveSubtitles={onSaveSubtitles}
+              onSaveSilences={onSaveSilences}
+              onSaveTimeline={onSaveTimeline}
+              onSaveAsset={onSaveAsset}
+              onDeleteAsset={onDeleteAsset}
+              onRefresh={onRefresh}
+            />
+          )}
           {activeTab === 'transcript' && <TranscriptEditor state={state} onSave={onSaveTranscript} onSeek={onSeek} />}
           {activeTab === 'subtitles' && <SubtitleEditor state={state} onSave={onSaveSubtitles} onSeek={onSeek} />}
           {activeTab === 'silences' && <SilenceEditor state={state} busy={busy} onSave={onSaveSilences} onDetect={onDetectSilence} />}
@@ -680,6 +849,203 @@ function Inspector({
         </>
       )}
     </aside>
+  );
+}
+
+function SelectionInspector({
+  state,
+  selection,
+  currentMs,
+  onSelect,
+  onSeek,
+  onSaveSubtitles,
+  onSaveSilences,
+  onSaveTimeline,
+  onSaveAsset,
+  onDeleteAsset,
+  onRefresh
+}: {
+  state: ApiState;
+  selection: NonNullable<SelectionTarget>;
+  currentMs: number;
+  onSelect: (target: SelectionTarget) => void;
+  onSeek: (ms: number) => void;
+  onSaveSubtitles: (items: SubtitleCue[]) => Promise<void>;
+  onSaveSilences: (items: SilenceSegment[]) => Promise<void>;
+  onSaveTimeline: (items: TimelineEvent[]) => Promise<void>;
+  onSaveAsset: (asset: ApiAsset) => Promise<unknown>;
+  onDeleteAsset: (assetId: string) => Promise<void>;
+  onRefresh: () => Promise<void>;
+}) {
+  const duration = Math.max(state.video.durationMs, 1);
+
+  if (selection.kind === 'silence') {
+    const item = state.silences.find((segment) => segment.id === selection.id);
+    if (!item) return null;
+    const save = (patch: Partial<SilenceSegment>) => onSaveSilences(state.silences.map((segment) => segment.id === item.id ? {
+      ...segment,
+      ...patch,
+      durationMs: Math.max(0, Number(patch.endMs ?? segment.endMs) - Number(patch.startMs ?? segment.startMs))
+    } : segment));
+    return (
+      <div className="selection-card">
+        <PanelHead title="Corte seleccionado" action="Cerrar" onAction={() => onSelect(null)} />
+        <TimeRangeFields startMs={item.startMs} endMs={item.endMs} durationMs={duration} onChange={(range) => save(range)} />
+        <div className="selection-actions">
+          <button onClick={() => onSeek(item.startMs)}>Ir al corte</button>
+          <button onClick={() => save({ action: item.action === 'cut' ? 'keep' : 'cut' })}>{item.action === 'cut' ? 'Mantener' : 'Cortar'}</button>
+          <button onClick={() => {
+            onSaveSilences(state.silences.filter((segment) => segment.id !== item.id));
+            onSelect(null);
+          }}>Borrar</button>
+        </div>
+      </div>
+    );
+  }
+
+  if (selection.kind === 'subtitle') {
+    const cue = state.subtitles.find((item) => item.id === selection.id);
+    if (!cue) return null;
+    const save = (patch: Partial<SubtitleCue>) => onSaveSubtitles(state.subtitles.map((item) => item.id === cue.id ? { ...item, ...patch } : item));
+    return (
+      <div className="selection-card">
+        <PanelHead title="Subtitulo seleccionado" action="Cerrar" onAction={() => onSelect(null)} />
+        <textarea defaultValue={cue.text} onBlur={(event) => save({ text: event.target.value })} />
+        <TimeRangeFields startMs={cue.startMs} endMs={cue.endMs} durationMs={duration} onChange={(range) => save(range)} />
+        <InspectorField label="Tamano">
+          <input type="range" min="20" max="86" defaultValue={cue.style.fontSize} onChange={(event) => save({ style: { ...cue.style, fontSize: Number(event.target.value) } })} />
+          <strong>{cue.style.fontSize}px</strong>
+        </InspectorField>
+        <div className="selection-actions">
+          <button onClick={() => onSeek(cue.startMs)}>Ir</button>
+          <button onClick={() => onSaveSubtitles([...state.subtitles, { ...cue, id: clientId(), startMs: Math.min(duration - 300, cue.endMs + 120), endMs: Math.min(duration, cue.endMs + Math.max(500, cue.endMs - cue.startMs) + 120) }])}>Duplicar</button>
+          <button onClick={() => {
+            onSaveSubtitles(state.subtitles.filter((item) => item.id !== cue.id));
+            onSelect(null);
+          }}>Borrar</button>
+        </div>
+      </div>
+    );
+  }
+
+  if (selection.kind === 'asset') {
+    const asset = state.assets.find((item) => item.id === selection.id);
+    if (!asset) return null;
+    const saveAsset = async (patch: Partial<ApiAsset>) => {
+      await onSaveAsset({ ...asset, ...patch });
+      await onRefresh();
+    };
+    return (
+      <div className="selection-card">
+        <PanelHead title="PNG seleccionado" action="Cerrar" onAction={() => onSelect(null)} />
+        {asset.fileUrl && <img className="selection-thumb" src={asset.fileUrl} />}
+        <input defaultValue={asset.label} onBlur={(event) => saveAsset({ label: event.target.value })} />
+        <input defaultValue={asset.triggerWords.join(', ')} onBlur={(event) => saveAsset({ triggerWords: parseWords(event.target.value) })} />
+        <PositionFields asset={asset} onChange={(position) => saveAsset({ position })} />
+        <div className="selection-actions">
+          <button onClick={() => {
+            const startMs = Math.max(0, currentMs);
+            const event: TimelineEvent = {
+              id: clientId(),
+              videoId: state.video.id,
+              type: 'image_overlay',
+              startMs,
+              endMs: Math.min(duration, startMs + 1600),
+              enabled: true,
+              payload: { assetId: asset.id }
+            };
+            onSaveTimeline([...state.timeline, event]);
+            onSelect({ kind: 'image_overlay', id: event.id });
+          }}>Crear overlay</button>
+          <button onClick={async () => {
+            await onDeleteAsset(asset.id);
+            onSelect(null);
+            await onRefresh();
+          }}>Borrar asset</button>
+        </div>
+      </div>
+    );
+  }
+
+  const event = state.timeline.find((item) => item.id === selection.id);
+  if (!event) return null;
+  const saveEvent = (patch: Partial<TimelineEvent>) => onSaveTimeline(state.timeline.map((item) => item.id === event.id ? { ...item, ...patch } : item));
+  const title = event.type === 'zoom' ? 'Zoom seleccionado' : 'Overlay seleccionado';
+  const selectedAsset = event.type === 'image_overlay' ? state.assets.find((asset) => asset.id === event.payload.assetId) : null;
+
+  return (
+    <div className="selection-card">
+      <PanelHead title={title} action="Cerrar" onAction={() => onSelect(null)} />
+      <TimeRangeFields startMs={event.startMs} endMs={event.endMs} durationMs={duration} onChange={(range) => saveEvent(range)} />
+      {event.type === 'zoom' ? (
+        <InspectorField label="Escala">
+          <input type="range" min="1" max="2.5" step="0.01" defaultValue={Number(event.payload.scale ?? 1.18)} onChange={(input) => saveEvent({ payload: { ...event.payload, scale: Number(input.target.value) } })} />
+          <strong>{Number(event.payload.scale ?? 1.18).toFixed(2)}x</strong>
+        </InspectorField>
+      ) : (
+        <InspectorField label="Asset">
+          <select value={String(event.payload.assetId ?? '')} onChange={(input) => saveEvent({ payload: { ...event.payload, assetId: input.target.value } })}>
+            {state.assets.map((asset) => <option key={asset.id} value={asset.id}>{asset.label}</option>)}
+          </select>
+          <strong>{selectedAsset?.label ?? 'sin asset'}</strong>
+        </InspectorField>
+      )}
+      <div className="selection-actions">
+        <button onClick={() => onSeek(event.startMs)}>Ir</button>
+        <button onClick={() => saveEvent({ enabled: !event.enabled })}>{event.enabled ? 'Desactivar' : 'Activar'}</button>
+        <button onClick={() => onSaveTimeline([...state.timeline, { ...event, id: clientId(), startMs: Math.min(duration - 300, event.endMs + 120), endMs: Math.min(duration, event.endMs + Math.max(500, event.endMs - event.startMs) + 120) }])}>Duplicar</button>
+        <button onClick={() => {
+          onSaveTimeline(state.timeline.filter((item) => item.id !== event.id));
+          onSelect(null);
+        }}>Borrar</button>
+      </div>
+    </div>
+  );
+}
+
+function TimeRangeFields({
+  startMs,
+  endMs,
+  durationMs,
+  onChange
+}: {
+  startMs: number;
+  endMs: number;
+  durationMs: number;
+  onChange: (range: { startMs: number; endMs: number }) => void;
+}) {
+  return (
+    <div className="time-fields">
+      <label>
+        <span>Inicio</span>
+        <input key={`start-${startMs}`} type="number" step="0.01" defaultValue={(startMs / 1000).toFixed(2)} onBlur={(event) => onChange(clampRange({ startMs: Number(event.target.value) * 1000, endMs }, durationMs))} />
+      </label>
+      <label>
+        <span>Fin</span>
+        <input key={`end-${endMs}`} type="number" step="0.01" defaultValue={(endMs / 1000).toFixed(2)} onBlur={(event) => onChange(clampRange({ startMs, endMs: Number(event.target.value) * 1000 }, durationMs))} />
+      </label>
+    </div>
+  );
+}
+
+function PositionFields({ asset, onChange }: { asset: ApiAsset; onChange: (position: ApiAsset['position']) => void }) {
+  const position = asset.position;
+  const save = (patch: Partial<ApiAsset['position']>) => onChange({ ...position, ...patch });
+  return (
+    <div className="position-fields">
+      <InspectorField label="X">
+        <input type="range" min="0" max="1" step="0.01" defaultValue={position.x} onChange={(event) => save({ x: Number(event.target.value) })} />
+        <strong>{Math.round(position.x * 100)}%</strong>
+      </InspectorField>
+      <InspectorField label="Y">
+        <input type="range" min="0" max="1" step="0.01" defaultValue={position.y} onChange={(event) => save({ y: Number(event.target.value) })} />
+        <strong>{Math.round(position.y * 100)}%</strong>
+      </InspectorField>
+      <InspectorField label="Escala">
+        <input type="range" min="0.25" max="4" step="0.05" defaultValue={position.scale} onChange={(event) => save({ scale: Number(event.target.value) })} />
+        <strong>{position.scale.toFixed(2)}x</strong>
+      </InspectorField>
+    </div>
   );
 }
 
@@ -886,6 +1252,24 @@ function segmentStyle(startMs: number, endMs: number, duration: number) {
   };
 }
 
+function applyDrag(range: { startMs: number; endMs: number }, deltaMs: number, mode: DragMode) {
+  if (mode === 'start') return { ...range, startMs: range.startMs + deltaMs };
+  if (mode === 'end') return { ...range, endMs: range.endMs + deltaMs };
+  return { startMs: range.startMs + deltaMs, endMs: range.endMs + deltaMs };
+}
+
+function clampRange(range: { startMs: number; endMs: number }, durationMs: number) {
+  const minDuration = Math.min(180, Math.max(40, durationMs / 30));
+  let startMs = Math.max(0, Math.min(durationMs - minDuration, Math.round(range.startMs)));
+  let endMs = Math.max(startMs + minDuration, Math.min(durationMs, Math.round(range.endMs)));
+  if (endMs > durationMs) {
+    const overflow = endMs - durationMs;
+    startMs = Math.max(0, startMs - overflow);
+    endMs = durationMs;
+  }
+  return { startMs, endMs };
+}
+
 function formatDuration(ms: number) {
   const total = Math.max(0, Math.floor(ms / 1000));
   const minutes = Math.floor(total / 60);
@@ -918,6 +1302,10 @@ function tabLabel(tab: InspectorTab) {
     assets: 'PNGs',
     zooms: 'Zooms'
   }[tab];
+}
+
+function parseWords(value: string) {
+  return value.split(',').map((word) => word.trim()).filter(Boolean);
 }
 
 function clientId() {
