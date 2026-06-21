@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { env } from '../env.js';
 import { formatSeconds } from '../utils/time.js';
-import { SilenceSegment, VideoThumbnail, WaveformPoint } from '../../shared/types.js';
+import { SilenceDetectionSettings, SilenceSegment, VideoThumbnail, WaveformPoint } from '../../shared/types.js';
 import { createId } from '../db/store.js';
 
 export interface ProbeResult {
@@ -210,6 +210,16 @@ export interface DetectSilenceOptions {
   noiseDb?: number;
   minDurationSec?: number;
   durationMs?: number;
+  paddingBeforeMs?: number;
+  paddingAfterMs?: number;
+  preserveBreaths?: boolean;
+}
+
+export interface DetectSilenceResult {
+  rows: SilenceSegment[];
+  settings: SilenceDetectionSettings;
+  rawCount: number;
+  skippedCount: number;
 }
 
 export async function extractAudio(inputPath: string, outputPath: string) {
@@ -229,18 +239,36 @@ export async function extractAudio(inputPath: string, outputPath: string) {
   ]);
 }
 
-export async function detectSilence(inputPath: string, videoId: string, options: DetectSilenceOptions = {}) {
-  const noiseDb = clamp(options.noiseDb ?? env.silenceNoiseDb, -80, -10);
-  const minDurationSec = clamp(options.minDurationSec ?? env.silenceMinDurationSec, 0.12, 3);
-  const filter = `silencedetect=noise=${noiseDb}dB:d=${minDurationSec}`;
+export function normalizeSilenceSettings(options: DetectSilenceOptions = {}): SilenceDetectionSettings {
+  const preserveBreaths = options.preserveBreaths !== false;
+  const naturalBreathMs = preserveBreaths ? 90 : 0;
+  return {
+    noiseDb: clamp(options.noiseDb ?? env.silenceNoiseDb, -80, -10),
+    minDurationSec: clamp(options.minDurationSec ?? env.silenceMinDurationSec, 0.12, 3),
+    paddingBeforeMs: Math.round(clamp(options.paddingBeforeMs ?? 80, 0, 900) + naturalBreathMs),
+    paddingAfterMs: Math.round(clamp(options.paddingAfterMs ?? 120, 0, 900) + naturalBreathMs),
+    preserveBreaths
+  };
+}
+
+export async function detectSilence(inputPath: string, videoId: string, options: DetectSilenceOptions = {}): Promise<DetectSilenceResult> {
+  const settings = normalizeSilenceSettings(options);
+  const filter = `silencedetect=noise=${settings.noiseDb}dB:d=${settings.minDurationSec}`;
   const { stderr } = await runCommand(env.ffmpegPath, ['-hide_banner', '-i', inputPath, '-af', filter, '-f', 'null', '-']);
 
   const events = parseSilenceLog(stderr);
   const rows: SilenceSegment[] = [];
+  let skippedCount = 0;
+  const durationMs = options.durationMs && options.durationMs > 0 ? options.durationMs : Number.POSITIVE_INFINITY;
   for (const event of events) {
-    const startMs = Math.round(event.startSec * 1000);
-    const endMs = Math.round(event.endSec * 1000);
-    if (endMs - startMs < Math.max(120, minDurationSec * 1000 * 0.8)) continue;
+    const rawStartMs = Math.round(event.startSec * 1000);
+    const rawEndMs = Math.round(event.endSec * 1000);
+    const startMs = Math.max(0, Math.min(durationMs, rawStartMs + settings.paddingBeforeMs));
+    const endMs = Math.max(0, Math.min(durationMs, rawEndMs - settings.paddingAfterMs));
+    if (endMs - startMs < Math.max(120, settings.minDurationSec * 1000 * 0.45)) {
+      skippedCount += 1;
+      continue;
+    }
     rows.push({
       id: createId(),
       videoId,
@@ -250,7 +278,7 @@ export async function detectSilence(inputPath: string, videoId: string, options:
       action: 'cut'
     });
   }
-  return rows;
+  return { rows, settings, rawCount: events.length, skippedCount };
 }
 
 function parseSilenceLog(stderr: string) {

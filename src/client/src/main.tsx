@@ -37,6 +37,21 @@ type SelectionKind = 'silence' | 'subtitle' | 'asset' | 'zoom' | 'image_overlay'
 type SelectionTarget = { kind: SelectionKind; id: string } | null;
 type DragMode = 'move' | 'start' | 'end';
 type PipelineStepKey = 'ingest' | 'generate_waveform' | 'generate_thumbnails' | 'detect_silence' | 'transcribe';
+type SilenceDetectRequest = {
+  noiseDb: number;
+  minDurationSec: number;
+  paddingBeforeMs: number;
+  paddingAfterMs: number;
+  preserveBreaths: boolean;
+};
+
+const defaultSilenceDetectRequest: SilenceDetectRequest = {
+  noiseDb: -35,
+  minDurationSec: 0.35,
+  paddingBeforeMs: 80,
+  paddingAfterMs: 120,
+  preserveBreaths: true
+};
 
 const selectionTabs: Record<SelectionKind, InspectorTab> = {
   silence: 'silences',
@@ -135,7 +150,7 @@ const api = {
 function App() {
   const [videos, setVideos] = useState<ApiVideo[]>([]);
   const [state, setState] = useState<ApiState | null>(null);
-  const [activeTab, setActiveTab] = useState<InspectorTab>('transcript');
+  const [activeTab, setActiveTab] = useState<InspectorTab>(() => initialInspectorTab());
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [currentMs, setCurrentMs] = useState(0);
@@ -251,7 +266,7 @@ function App() {
   async function runPipelineStep(type: 'waveform' | 'thumbnails' | 'detect-silence' | 'transcribe') {
     if (!state) return;
     await runAction(`Regenerando ${type}`, async () => {
-      const payload = type === 'detect-silence' ? { noiseDb: -35, minDurationSec: 0.35, source: 'manual_retry' } : { source: 'manual_retry' };
+      const payload = type === 'detect-silence' ? { ...defaultSilenceDetectRequest, source: 'manual_retry' } : { source: 'manual_retry' };
       await api.enqueue(state.video.id, type, payload);
     });
   }
@@ -265,7 +280,7 @@ function App() {
         setAspect={setAspect}
         busy={busy}
         onDetectSilence={() => state && runAction('Detectando silencios', async () => {
-          await api.enqueue(state.video.id, 'detect-silence', { noiseDb: -35, minDurationSec: 0.35 });
+          await api.enqueue(state.video.id, 'detect-silence', defaultSilenceDetectRequest);
         })}
         onTranscribe={() => state && runAction('Transcribiendo', async () => {
           await api.enqueue(state.video.id, 'transcribe');
@@ -346,8 +361,8 @@ function App() {
           onSaveAsset={api.patchAsset}
           onDeleteAsset={api.deleteAsset}
           onRefresh={() => state ? refresh(state.video.id) : Promise.resolve()}
-          onDetectSilence={(noiseDb, minDurationSec) => state && runAction('Detectando silencios', async () => {
-            await api.enqueue(state.video.id, 'detect-silence', { noiseDb, minDurationSec });
+          onDetectSilence={(settings) => state && runAction('Detectando silencios', async () => {
+            await api.enqueue(state.video.id, 'detect-silence', settings);
           })}
         />
       </div>
@@ -880,7 +895,7 @@ function Inspector({
   onSaveAsset: (asset: ApiAsset) => Promise<unknown>;
   onDeleteAsset: (assetId: string) => Promise<void>;
   onRefresh: () => Promise<void>;
-  onDetectSilence: (noiseDb: number, minDurationSec: number) => void;
+  onDetectSilence: (settings: SilenceDetectRequest) => void;
 }) {
   return (
     <aside className="inspector">
@@ -1175,14 +1190,29 @@ function SilenceEditor({
   state: ApiState;
   busy: string;
   onSave: (items: SilenceSegment[]) => Promise<void>;
-  onDetect: (noiseDb: number, minDurationSec: number) => void;
+  onDetect: (settings: SilenceDetectRequest) => void;
 }) {
-  const [noiseDb, setNoiseDb] = useState(-35);
-  const [minDurationSec, setMinDurationSec] = useState(0.35);
+  const latestSettings = useMemo(() => readLatestSilenceSettings(state.jobs), [state.jobs]);
+  const [noiseDb, setNoiseDb] = useState(latestSettings.noiseDb);
+  const [minDurationSec, setMinDurationSec] = useState(latestSettings.minDurationSec);
+  const [paddingBeforeMs, setPaddingBeforeMs] = useState(latestSettings.paddingBeforeMs);
+  const [paddingAfterMs, setPaddingAfterMs] = useState(latestSettings.paddingAfterMs);
+  const [preserveBreaths, setPreserveBreaths] = useState(latestSettings.preserveBreaths);
+  useEffect(() => {
+    setNoiseDb(latestSettings.noiseDb);
+    setMinDurationSec(latestSettings.minDurationSec);
+    setPaddingBeforeMs(latestSettings.paddingBeforeMs);
+    setPaddingAfterMs(latestSettings.paddingAfterMs);
+    setPreserveBreaths(latestSettings.preserveBreaths);
+  }, [latestSettings.noiseDb, latestSettings.minDurationSec, latestSettings.paddingBeforeMs, latestSettings.paddingAfterMs, latestSettings.preserveBreaths]);
+
+  const settings = { noiseDb, minDurationSec, paddingBeforeMs, paddingAfterMs, preserveBreaths };
+  const activeCuts = state.silences.filter((item) => item.action === 'cut');
   const totalCutMs = state.silences.filter((item) => item.action === 'cut').reduce((sum, item) => sum + item.durationMs, 0);
+  const outputMs = Math.max(0, state.video.durationMs - totalCutMs);
   return (
     <div className="editor-list">
-      <PanelHead title="Silencios" action="Re-detectar" onAction={() => onDetect(noiseDb, minDurationSec)} />
+      <PanelHead title="Silencios" action="Detectar" onAction={() => onDetect(settings)} />
       <InspectorField label="Umbral dB">
         <input type="range" min="-60" max="-15" value={noiseDb} onChange={(event) => setNoiseDb(Number(event.target.value))} />
         <strong>{noiseDb} dB</strong>
@@ -1191,16 +1221,37 @@ function SilenceEditor({
         <input type="range" min="0.12" max="1.5" step="0.01" value={minDurationSec} onChange={(event) => setMinDurationSec(Number(event.target.value))} />
         <strong>{minDurationSec.toFixed(2)} s</strong>
       </InspectorField>
+      <InspectorField label="Aire antes">
+        <input type="range" min="0" max="600" step="10" value={paddingBeforeMs} onChange={(event) => setPaddingBeforeMs(Number(event.target.value))} />
+        <strong>{paddingBeforeMs} ms</strong>
+      </InspectorField>
+      <InspectorField label="Aire despues">
+        <input type="range" min="0" max="600" step="10" value={paddingAfterMs} onChange={(event) => setPaddingAfterMs(Number(event.target.value))} />
+        <strong>{paddingAfterMs} ms</strong>
+      </InspectorField>
+      <label className="toggle-row">
+        <input type="checkbox" checked={preserveBreaths} onChange={(event) => setPreserveBreaths(event.target.checked)} />
+        <span>
+          <strong>Respiraciones naturales</strong>
+          <small>Deja un margen extra para que el corte no suene robotico.</small>
+        </span>
+      </label>
       <div className="metric-card">
         <span>Cortes activos</span>
-        <strong>{state.silences.filter((item) => item.action === 'cut').length}</strong>
-        <small>{formatDuration(totalCutMs)} removidos en render</small>
+        <strong>{activeCuts.length}</strong>
+        <small>{formatDuration(totalCutMs)} removidos - final estimado {formatDuration(outputMs)}</small>
       </div>
-      <button disabled={!!busy || !state.silences.length} onClick={() => onSave(state.silences.map((item) => ({ ...item, action: 'keep' })))}>Restaurar todos</button>
+      <div className="silence-actions">
+        <button disabled={!!busy || !state.silences.length} onClick={() => onSave(state.silences.map((item) => ({ ...item, action: 'cut' })))}>Aplicar todos</button>
+        <button disabled={!!busy || !state.silences.length} onClick={() => onSave(state.silences.map((item) => ({ ...item, action: 'keep' })))}>Restaurar todos</button>
+      </div>
       {state.silences.map((segment) => (
         <button key={segment.id} className={`silence-row ${segment.action}`} onClick={() => onSave(state.silences.map((item) => item.id === segment.id ? { ...item, action: item.action === 'cut' ? 'keep' : 'cut' } : item))}>
-          <span>{formatDuration(segment.startMs)} - {formatDuration(segment.endMs)}</span>
-          <strong>{segment.action}</strong>
+          <span>
+            <b>{formatDuration(segment.startMs)} - {formatDuration(segment.endMs)}</b>
+            <small>{formatDuration(segment.durationMs)} detectado</small>
+          </span>
+          <strong>{segment.action === 'cut' ? 'cortar' : 'mantener'}</strong>
         </button>
       ))}
     </div>
@@ -1384,6 +1435,24 @@ function parseWords(value: string) {
   return value.split(',').map((word) => word.trim()).filter(Boolean);
 }
 
+function readLatestSilenceSettings(jobs: VideoJob[]): SilenceDetectRequest {
+  const job = jobs.find((item) => item.type === 'detect_silence' && item.result && typeof item.result === 'object');
+  const result = job?.result as { settings?: Partial<SilenceDetectRequest> } | undefined;
+  const settings = result?.settings ?? {};
+  return {
+    noiseDb: finiteNumber(settings.noiseDb, defaultSilenceDetectRequest.noiseDb),
+    minDurationSec: finiteNumber(settings.minDurationSec, defaultSilenceDetectRequest.minDurationSec),
+    paddingBeforeMs: finiteNumber(settings.paddingBeforeMs, defaultSilenceDetectRequest.paddingBeforeMs),
+    paddingAfterMs: finiteNumber(settings.paddingAfterMs, defaultSilenceDetectRequest.paddingAfterMs),
+    preserveBreaths: settings.preserveBreaths !== false
+  };
+}
+
+function initialInspectorTab(): InspectorTab {
+  const tab = new URLSearchParams(window.location.search).get('tab');
+  return tab === 'subtitles' || tab === 'silences' || tab === 'assets' || tab === 'zooms' ? tab : 'transcript';
+}
+
 function pipelineSteps(state: ApiState, jobsByType: Map<string, VideoJob>, uploadProgress: number | null) {
   const step = (
     key: PipelineStepKey,
@@ -1426,6 +1495,11 @@ function pipelineSteps(state: ApiState, jobsByType: Map<string, VideoJob>, uploa
 
 function clientId() {
   return `ui_${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function finiteNumber(value: unknown, fallback: number) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
 }
 
 createRoot(document.getElementById('root')!).render(<App />);

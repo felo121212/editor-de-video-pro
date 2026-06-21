@@ -65,12 +65,16 @@ while (true) {
     }
 
     if (job.type === 'detect_silence') {
-      const settings = {
+      const requestedSettings = {
         noiseDb: numberFromPayload(job.payload.noiseDb, env.silenceNoiseDb),
         minDurationSec: numberFromPayload(job.payload.minDurationSec, env.silenceMinDurationSec),
+        paddingBeforeMs: numberFromPayload(job.payload.paddingBeforeMs, 80),
+        paddingAfterMs: numberFromPayload(job.payload.paddingAfterMs, 120),
+        preserveBreaths: booleanFromPayload(job.payload.preserveBreaths, true),
         durationMs: video.durationMs
       };
-      const rows = await detectSilence(video.originalPath, video.id, settings);
+      const result = await detectSilence(video.originalPath, video.id, requestedSettings);
+      const rows = result.rows;
       await store.replaceSilences(video.id, rows);
       const existingTimeline = await store.getTimeline(video.id);
       const nonCuts = existingTimeline.filter((event) => event.type !== 'cut');
@@ -83,11 +87,11 @@ while (true) {
           startMs: row.startMs,
           endMs: row.endMs,
           enabled: row.action === 'cut',
-          payload: { source: 'ffmpeg_silencedetect', durationMs: row.durationMs }
+          payload: { source: 'ffmpeg_silencedetect', durationMs: row.durationMs, settings: result.settings }
         }))
       ]);
       await store.updateVideo(video.id, { status: 'ready' });
-      await store.updateJob(job.id, { status: 'done', progress: 100, result: { count: rows.length, settings } });
+      await store.updateJob(job.id, { status: 'done', progress: 100, result: { count: rows.length, rawCount: result.rawCount, skippedCount: result.skippedCount, settings: result.settings } });
       continue;
     }
 
@@ -130,4 +134,10 @@ function sleep(ms: number) {
 function numberFromPayload(value: unknown, fallback: number) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function booleanFromPayload(value: unknown, fallback: boolean) {
+  if (value === true || value === 'true') return true;
+  if (value === false || value === 'false') return false;
+  return fallback;
 }

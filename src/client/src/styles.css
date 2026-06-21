@@ -364,7 +364,8 @@ input[type="range"] {
 .project-list {
   display: grid;
   gap: 8px;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding-right: 4px;
 }
 
@@ -373,10 +374,16 @@ input[type="range"] {
   grid-template-columns: 58px 1fr auto;
   align-items: center;
   gap: 10px;
+  width: 100%;
   min-height: 70px;
+  min-width: 0;
   text-align: left;
   border-color: transparent;
   background: transparent;
+}
+
+.project-card > span:not(.thumb) {
+  min-width: 0;
 }
 
 .project-card.is-active {
@@ -1081,6 +1088,38 @@ select {
   align-items: center;
 }
 
+.toggle-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.035);
+  cursor: pointer;
+}
+
+.toggle-row input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+.toggle-row span {
+  display: grid;
+  gap: 3px;
+}
+
+.toggle-row strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.toggle-row small {
+  line-height: 1.35;
+}
+
 .metric-card {
   display: grid;
   gap: 5px;
@@ -1094,10 +1133,31 @@ select {
   font-size: 28px;
 }
 
+.silence-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
 .silence-row {
   display: flex;
   justify-content: space-between;
+  gap: 12px;
   text-align: left;
+}
+
+.silence-row span {
+  display: grid;
+  gap: 3px;
+}
+
+.silence-row b {
+  font-size: 12px;
+}
+
+.silence-row small {
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .silence-row.cut strong {

@@ -3,6 +3,14 @@ export type JobType = 'ingest' | 'generate_waveform' | 'generate_thumbnails' | '
 export type JobStatus = 'queued' | 'running' | 'done' | 'failed';
 export type TimelineEventType = 'cut' | 'zoom' | 'image_overlay' | 'subtitle_style';
 
+export interface SilenceDetectionSettings {
+  noiseDb: number;
+  minDurationSec: number;
+  paddingBeforeMs: number;
+  paddingAfterMs: number;
+  preserveBreaths: boolean;
+}
+
 export interface VideoProject {
   id: string;
   title: string;
